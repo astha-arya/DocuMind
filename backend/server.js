@@ -7,6 +7,7 @@ const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
 const { buildDocumentTree, getNavigationMap, getDocumentStats } = require('./utils/structureParser');
+const { splitPdfToImages, cleanupPageImages, getPdfInfo } = require('./utils/pdfProcessor');
 
 // Load environment variables
 dotenv.config();
@@ -66,7 +67,7 @@ const upload = multer({
   storage: storage,
   fileFilter: fileFilter,
   limits: {
-    fileSize: 10 * 1024 * 1024 // 10MB file size limit
+    fileSize: 50 * 1024 * 1024 // 50MB file size limit
   }
 });
 
@@ -236,8 +237,10 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// File upload route with automated preprocessing and OCR pipeline
+// File upload route with automated preprocessing, OCR pipeline, and multi-page PDF support
 app.post('/api/upload', upload.single('document'), async (req, res) => {
+  let tempPagesDir = null; // Track temporary directory for cleanup
+  
   try {
     // Check if file was uploaded
     if (!req.file) {
@@ -258,17 +261,192 @@ app.post('/api/upload', upload.single('document'), async (req, res) => {
       uploadedAt: new Date().toISOString()
     };
 
-    // Check if file is an image (not PDF)
+    // Check file type
     const isImage = /image\/(jpeg|jpg|png|gif)/.test(req.file.mimetype);
+    const isPdf = req.file.mimetype === 'application/pdf';
     
-    // If image, run the complete preprocessing + OCR pipeline
-    if (isImage) {
+    // Handle PDF files (multi-page support)
+    if (isPdf) {
+      try {
+        console.log('\n📄 PDF Upload Detected - Starting Multi-Page Processing');
+        console.log(`📁 PDF: ${fileInfo.originalName}`);
+        
+        // Step 1: Split PDF into page images
+        console.log('\n🔪 Step 1: Splitting PDF into pages...');
+        const pdfResult = await splitPdfToImages(fileInfo.absolutePath, path.dirname(fileInfo.absolutePath));
+        
+        if (!pdfResult.success) {
+          throw pdfResult;
+        }
+        
+        tempPagesDir = pdfResult.outputDir; // Store for cleanup
+        console.log(`✅ PDF split complete: ${pdfResult.pageCount} pages`);
+        
+        fileInfo.isPdf = true;
+        fileInfo.pageCount = pdfResult.pageCount;
+        fileInfo.pages = [];
+        
+        // Step 2: Process each page through the pipeline
+        console.log('\n🔄 Step 2: Processing each page through OCR pipeline...\n');
+        
+        for (let i = 0; i < pdfResult.pages.length; i++) {
+          const pageImagePath = pdfResult.pages[i];
+          const pageNumber = i + 1;
+          const totalPages = pdfResult.pageCount;
+
+
+          console.log(`${'='.repeat(60)}`);
+          console.log(`📄 STARTING: Page ${pageNumber} of ${totalPages}`);
+          console.log(`⏳ Progress: ${Math.round((pageNumber / totalPages) * 100)}%`);
+          console.log(`${'='.repeat(60)}`);
+          
+          const pageData = {
+            pageNumber: pageNumber,
+            imagePath: pageImagePath,
+            preprocessed: false,
+            ocrCompleted: false
+          };
+          
+          try {
+            // Step 2a: Preprocess the page image
+            console.log(`\n🔄 Step 2a: Preprocessing page ${pageNumber}...`);
+            const preprocessResult = await runPreprocessing(path.resolve(pageImagePath));
+            
+            if (!preprocessResult || !preprocessResult.success) {
+              throw {
+                stage: 'preprocessing',
+                error: preprocessResult?.error || 'Preprocessing failed',
+                page: pageNumber
+              };
+            }
+            
+            console.log(`✅ Page ${pageNumber} preprocessing completed`);
+            
+            pageData.preprocessed = true;
+            pageData.processedImagePath = preprocessResult.processed_image;
+            pageData.preprocessingSteps = preprocessResult.preprocessing_steps;
+            
+            // Step 2b: Run OCR on the processed page
+            console.log(`\n🔍 Step 2b: Running OCR on page ${pageNumber}...`);
+            const ocrResult = await runOCR(preprocessResult.processed_image);
+            
+            if (!ocrResult || !ocrResult.success) {
+              throw {
+                stage: 'ocr',
+                error: ocrResult?.error || 'OCR failed',
+                page: pageNumber
+              };
+            }
+            
+            console.log(`✅ Page ${pageNumber} OCR completed`);
+            console.log(`📊 Extracted ${ocrResult.metadata.word_count} words with ${ocrResult.metadata.average_confidence}% confidence`);
+            
+            pageData.ocrCompleted = true;
+            pageData.extractedText = ocrResult.text || '';
+            pageData.ocrMetadata = {
+              wordCount: ocrResult.metadata.word_count,
+              averageConfidence: ocrResult.metadata.average_confidence,
+              language: ocrResult.metadata.language
+            };
+            
+            // Step 2c: Build structure for this page
+            console.log(`\n🌳 Step 2c: Building structure for page ${pageNumber}...`);
+            try {
+              const structuralData = buildDocumentTree(pageData.extractedText);
+              const navigationMap = getNavigationMap(structuralData.tree);
+              const documentStats = getDocumentStats(structuralData.tree);
+              
+              pageData.structuredTree = structuralData.tree;
+              pageData.structureMetadata = structuralData.metadata;
+              pageData.navigationMap = navigationMap;
+              pageData.documentStats = documentStats;
+              
+              console.log(`✅ Page ${pageNumber} structure built: ${documentStats.headings} headings, ${documentStats.contentNodes} content nodes`);
+            } catch (structureError) {
+              console.error(`⚠️  Structure parsing warning for page ${pageNumber}:`, structureError);
+              pageData.structuredTree = [];
+              pageData.structureMetadata = { error: 'Structure parsing failed' };
+            }
+            
+            // Step 2d: Cleanup temporary page images (original and processed)
+            console.log(`\n🗑️  Step 2d: Cleaning up temporary images for page ${pageNumber}...`);
+            try {
+              // Mark processed image for deletion (original page image in temp dir will be cleaned up at end)
+              if (preprocessResult.processed_image && fs.existsSync(preprocessResult.processed_image)) {
+                await fs.promises.unlink(preprocessResult.processed_image);
+                console.log(`✅ Deleted processed image: ${path.basename(preprocessResult.processed_image)}`);
+              }
+            } catch (cleanupError) {
+              console.warn(`⚠️  Cleanup warning for page ${pageNumber}:`, cleanupError.message);
+            }
+            
+            console.log(`\n✅ Page ${pageNumber} processing complete!\n`);
+            
+          } catch (pageError) {
+            console.error(`\n❌ Error processing page ${pageNumber}:`, pageError);
+            
+            pageData.error = true;
+            pageData.errorMessage = pageError.error || pageError.message || 'Page processing failed';
+            pageData.errorStage = pageError.stage || 'unknown';
+          }
+          
+          // Add page data to results
+          fileInfo.pages.push(pageData);
+        }
+        
+        // Calculate aggregate statistics
+        const successfulPages = fileInfo.pages.filter(p => p.ocrCompleted);
+        const totalWords = successfulPages.reduce((sum, p) => sum + (p.ocrMetadata?.wordCount || 0), 0);
+        const avgConfidence = successfulPages.length > 0
+          ? successfulPages.reduce((sum, p) => sum + (p.ocrMetadata?.averageConfidence || 0), 0) / successfulPages.length
+          : 0;
+        
+        fileInfo.aggregateStats = {
+          totalPages: pdfResult.pageCount,
+          successfulPages: successfulPages.length,
+          failedPages: pdfResult.pageCount - successfulPages.length,
+          totalWords: totalWords,
+          averageConfidence: Math.round(avgConfidence * 100) / 100
+        };
+        
+        // Cleanup: Remove temporary pages directory
+        console.log(`\n🗑️  Final Cleanup: Removing temporary pages directory...`);
+        await cleanupPageImages(tempPagesDir);
+        tempPagesDir = null; // Mark as cleaned
+        
+        console.log(`\n${'='.repeat(60)}`);
+        console.log(`✅ PDF Processing Complete!`);
+        console.log(`📊 Successfully processed ${successfulPages.length}/${pdfResult.pageCount} pages`);
+        console.log(`📝 Total words extracted: ${totalWords}`);
+        console.log(`🎯 Average confidence: ${avgConfidence.toFixed(2)}%`);
+        console.log(`${'='.repeat(60)}\n`);
+        
+      } catch (pdfError) {
+        console.error('\n❌ PDF processing error:', pdfError);
+        
+        fileInfo.isPdf = true;
+        fileInfo.error = true;
+        fileInfo.errorMessage = pdfError.error || pdfError.message || 'PDF processing failed';
+        fileInfo.errorDetails = pdfError.details || pdfError.toString();
+        
+        // Cleanup on error
+        if (tempPagesDir) {
+          try {
+            await cleanupPageImages(tempPagesDir);
+          } catch (cleanupErr) {
+            console.error('Cleanup error:', cleanupErr);
+          }
+        }
+      }
+      
+    } else if (isImage) {
+      // Handle single image files (existing pipeline)
       let preprocessResult = null;
       let ocrResult = null;
       
       try {
         console.log('\n🔄 Starting automated pipeline...');
-        console.log('📸 Step 1/2: Image Preprocessing');
+        console.log('📸 Step 1/3: Image Preprocessing');
         
         // Step 1: Preprocess the image
         preprocessResult = await runPreprocessing(fileInfo.absolutePath);
@@ -294,7 +472,7 @@ app.post('/api/upload', upload.single('document'), async (req, res) => {
         fileInfo.originalDimensions = preprocessResult.original_dimensions;
         
         // Step 2: Run OCR on the processed image
-        console.log('\n🔍 Step 2/2: Running OCR');
+        console.log('\n🔍 Step 2/3: Running OCR');
         console.log(`📍 OCR input path: ${preprocessResult.processed_image}`);
         
         ocrResult = await runOCR(preprocessResult.processed_image);
@@ -389,11 +567,10 @@ app.post('/api/upload', upload.single('document'), async (req, res) => {
         }
       }
     } else {
-      // PDF file - skip image processing pipeline
-      fileInfo.preprocessed = false;
-      fileInfo.ocrCompleted = false;
-      fileInfo.note = 'Image processing skipped (PDF file)';
-      console.log('📄 PDF uploaded - image processing pipeline skipped');
+      // Unknown file type
+      fileInfo.error = true;
+      fileInfo.errorMessage = 'Unsupported file type';
+      console.log('⚠️  Unsupported file type uploaded');
     }
 
     // Return success response with all processing results
@@ -404,6 +581,15 @@ app.post('/api/upload', upload.single('document'), async (req, res) => {
     });
 
   } catch (error) {
+    // Cleanup on catastrophic error
+    if (tempPagesDir) {
+      try {
+        await cleanupPageImages(tempPagesDir);
+      } catch (cleanupErr) {
+        console.error('Cleanup error:', cleanupErr);
+      }
+    }
+    
     console.error('❌ Upload error:', error);
     res.status(500).json({
       success: false,

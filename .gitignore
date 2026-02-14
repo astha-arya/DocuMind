@@ -1,4 +1,8 @@
-node_modules
-venv
+node_modules/
+venv/
 .env
-uploads
+uploads/
+*.pyc
+__pycache__/
+uploads/document-*
+uploads/*_pages/

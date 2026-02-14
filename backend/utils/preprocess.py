@@ -9,14 +9,17 @@ import sys
 import os
 import json
 from pathlib import Path
+import numpy as np
 
 
 def preprocess_image(input_path):
     """
     Preprocess an image for OCR using:
+    - Image scaling (2x upscaling for better resolution)
     - Grayscale conversion
     - Gaussian Blur (noise reduction)
     - Otsu's Thresholding (adaptive binarization)
+    - Dilation (thickens letters for better recognition)
     
     Args:
         input_path (str): Path to the input image
@@ -38,14 +41,24 @@ def preprocess_image(input_path):
         # Get original dimensions
         original_height, original_width = image.shape[:2]
         
-        # Step 1: Convert to grayscale
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        # Step 1: Scale image 2x for better OCR accuracy
+        # Using INTER_CUBIC for high-quality upscaling
+        scaled_width = original_width * 2
+        scaled_height = original_height * 2
+        scaled = cv2.resize(
+            image, 
+            (scaled_width, scaled_height), 
+            interpolation=cv2.INTER_CUBIC
+        )
         
-        # Step 2: Apply Gaussian Blur to reduce noise
+        # Step 2: Convert to grayscale
+        gray = cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY)
+        
+        # Step 3: Apply Gaussian Blur to reduce noise
         # Kernel size (5,5) works well for most documents
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
         
-        # Step 3: Apply Otsu's Thresholding
+        # Step 4: Apply Otsu's Thresholding
         # This automatically calculates the optimal threshold value
         _, threshold = cv2.threshold(
             blurred, 
@@ -53,6 +66,17 @@ def preprocess_image(input_path):
             255, 
             cv2.THRESH_BINARY + cv2.THRESH_OTSU
         )
+        
+        # Step 5: Apply Dilation to thicken the letters
+        # This helps with thin or broken characters
+        # Create a rectangular kernel for dilation
+        kernel = np.ones((2, 2), np.uint8)
+        dilated = cv2.dilate(threshold, kernel, iterations=1)
+        
+        # Optional: Apply opening (erosion followed by dilation) to remove noise
+        # This helps clean up small specks while keeping text intact
+        opening_kernel = np.ones((2, 2), np.uint8)
+        final_image = cv2.morphologyEx(dilated, cv2.MORPH_OPEN, opening_kernel)
         
         # Generate output filename
         input_filename = os.path.basename(input_path)
@@ -63,8 +87,8 @@ def preprocess_image(input_path):
         input_dir = os.path.dirname(input_path)
         output_path = os.path.join(input_dir, output_filename)
         
-        # Save the processed image
-        success = cv2.imwrite(output_path, threshold)
+        # Save the processed image with high quality
+        success = cv2.imwrite(output_path, final_image, [cv2.IMWRITE_JPEG_QUALITY, 95])
         
         if not success:
             raise IOError(f"Failed to save processed image to: {output_path}")
@@ -78,10 +102,18 @@ def preprocess_image(input_path):
                 "width": int(original_width),
                 "height": int(original_height)
             },
+            "processed_dimensions": {
+                "width": int(scaled_width),
+                "height": int(scaled_height)
+            },
+            "scaling_factor": 2.0,
             "preprocessing_steps": [
+                "2x Image Scaling (INTER_CUBIC)",
                 "Grayscale conversion",
                 "Gaussian Blur (5x5 kernel)",
-                "Otsu's Thresholding"
+                "Otsu's Thresholding",
+                "Dilation (2x2 kernel, 1 iteration)",
+                "Morphological Opening (noise removal)"
             ]
         }
         
