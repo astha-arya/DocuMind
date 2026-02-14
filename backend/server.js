@@ -1,3 +1,4 @@
+const Document = require('./models/Document');
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
@@ -260,6 +261,27 @@ app.post('/api/upload', upload.single('document'), async (req, res) => {
       mimetype: req.file.mimetype,
       uploadedAt: new Date().toISOString()
     };
+    const existingDoc = await Document.findOne({ 
+      originalName: fileInfo.originalName,
+      size: fileInfo.size 
+    });
+
+    if (existingDoc) {
+      console.log(`♻️  "${fileInfo.originalName}" already exists. Fetching from DB...`);
+      
+      // Cleanup the newly uploaded file to save disk space
+      if (fs.existsSync(fileInfo.path)) {
+        await fs.promises.unlink(fileInfo.path);
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: 'Retrieved from database',
+        file: existingDoc,
+        isExisting: true
+      });
+    }
+    console.log('\n🔄 Starting automated pipeline...');
 
     // Check file type
     const isImage = /image\/(jpeg|jpg|png|gif)/.test(req.file.mimetype);
@@ -573,6 +595,18 @@ app.post('/api/upload', upload.single('document'), async (req, res) => {
       console.log('⚠️  Unsupported file type uploaded');
     }
 
+    try {
+      console.log('\n💾 Saving complete processing results to MongoDB...');
+      const document = new Document(fileInfo);
+      const savedDoc = await document.save();
+      console.log(`✅ Document saved! ID: ${savedDoc._id}`);
+      
+      // Add the ID to the response so you can find it later
+      fileInfo._id = savedDoc._id; 
+    } catch (dbError) {
+      console.error('❌ MongoDB save error:', dbError.message);
+    }
+    
     // Return success response with all processing results
     res.status(200).json({
       success: true,
@@ -599,13 +633,16 @@ app.post('/api/upload', upload.single('document'), async (req, res) => {
   }
 });
 
+const documentRoutes = require('./routes/documentRoutes');
+app.use('/api/documents', documentRoutes);
+
 // Multer error handling middleware
 app.use((error, req, res, next) => {
   if (error instanceof multer.MulterError) {
     if (error.code === 'LIMIT_FILE_SIZE') {
       return res.status(400).json({
         success: false,
-        message: 'File size too large. Maximum size is 10MB.'
+        message: 'File size too large. Maximum size is 50MB.'
       });
     }
     return res.status(400).json({
@@ -624,6 +661,7 @@ app.use((error, req, res, next) => {
   next();
 });
 
+
 // 404 handler
 app.use((req, res) => {
   res.status(404).json({
@@ -631,6 +669,7 @@ app.use((req, res) => {
     message: 'Route not found'
   });
 });
+
 
 // Global error handler
 app.use((err, req, res, next) => {
