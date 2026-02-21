@@ -150,6 +150,70 @@ const AggregateStatsSchema = new mongoose.Schema({
   }
 }, { _id: false });
 
+// Sub-schema for Vision Analysis Results
+const VisionAnalysisSchema = new mongoose.Schema({
+  tables: [{
+    position: String,
+    markdown: String,
+    description: String
+  }],
+  images: [{
+    type: String,
+    altText: String,
+    position: String
+  }],
+  missingContent: String,
+  layoutNotes: String
+}, { _id: false });
+
+// Sub-schema for Audio Navigation
+const AudioNavigationSchema = new mongoose.Schema({
+  audioIntro: String,
+  documentSummary: {
+    type: mongoose.Schema.Types.Mixed,
+    mainPurpose: String,
+    estimatedListeningTime: String,
+    keyDates: [String],
+    keyAmounts: [String],
+    parties: [String]
+  },
+  navigationHints: [{
+    sectionId: String,
+    sectionName: String,
+    summary: String,
+    navigationCue: String,
+    keyInfo: [String],
+    estimatedTime: String
+  }],
+  visualElements: {
+    tableDescriptions: [String],
+    imageDescriptions: [String],
+    layoutGuidance: String
+  },
+  interactionGuide: mongoose.Schema.Types.Mixed,
+  accessibilityNotes: String
+}, { _id: false });
+
+// Sub-schema for Page AI Analysis
+const PageAIAnalysisSchema = new mongoose.Schema({
+  pageNumber: Number,
+  visionAnalysis: VisionAnalysisSchema,
+  audioNavigation: AudioNavigationSchema,
+  reviewMetadata: {
+    isAccurate: Boolean,
+    corrections: [String],
+    confidence: Number
+  }
+}, { _id: false });
+
+// Sub-schema for Complete AI Analysis
+const AIAnalysisSchema = new mongoose.Schema({
+  modelUsed: String,
+  analysisTimestamp: Date,
+  processingTime: Number,
+  pages: [PageAIAnalysisSchema]
+}, { _id: false });
+
 // Sub-schema for Original Dimensions
 const DimensionsSchema = new mongoose.Schema({
   width: Number,
@@ -219,6 +283,13 @@ const DocumentSchema = new mongoose.Schema({
   },
   pages: [PageSchema],
   aggregateStats: AggregateStatsSchema,
+  
+  // AI Analysis for Accessibility
+  aiAnalysis: AIAnalysisSchema,
+  aiEnabled: {
+    type: Boolean,
+    default: false
+  },
   
   // Error Handling
   error: Boolean,
@@ -367,6 +438,7 @@ DocumentSchema.pre('save', function() {
     this.aggregateStats.failedPages = 
       this.aggregateStats.totalPages - this.aggregateStats.successfulPages;
   }
+  
 });
 
 // Export the model

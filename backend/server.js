@@ -1,17 +1,19 @@
+const dotenv = require('dotenv');
+dotenv.config();
+
 const Document = require('./models/Document');
 const express = require('express');
 const cors = require('cors');
-const dotenv = require('dotenv');
 const mongoose = require('mongoose');
 const multer = require('multer');
+const Groq = require('groq-sdk');
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
 const { buildDocumentTree, getNavigationMap, getDocumentStats } = require('./utils/structureParser');
 const { splitPdfToImages, cleanupPageImages, getPdfInfo } = require('./utils/pdfProcessor');
-
-// Load environment variables
-dotenv.config();
+const { analyzeDocument } = require('./utils/reasoningAgent');
 
 // Initialize Express app
 const app = express();
@@ -595,6 +597,44 @@ app.post('/api/upload', upload.single('document'), async (req, res) => {
       console.log('⚠️  Unsupported file type uploaded');
     }
 
+    if (!fileInfo.error && (fileInfo.extractedText || fileInfo.pages)) {
+      try {
+        console.log('🤖 Starting Accessibility Analysis...');
+        
+        // Prepare data for the agent
+        // If it's a PDF, we use the pages array. If it's an image, we mock a single page.
+        const isPdf = fileInfo.mimetype === 'application/pdf';
+        const pagesData = isPdf && fileInfo.pages ? fileInfo.pages : [{
+            pageNumber: 1,
+            extractedText: fileInfo.extractedText,
+            processedImagePath: fileInfo.processedImagePath,
+            structuredTree: fileInfo.structuredTree
+        }];
+
+        const aiAnalysis = await analyzeDocument({
+          originalName: fileInfo.originalName,
+          documentType: isPdf ? 'document' : 'image',
+          isPdf: isPdf,
+          pageCount: pagesData.length,
+          pages: pagesData,
+          // Fallbacks if single page image
+          extractedText: fileInfo.extractedText,
+          structuredTree: fileInfo.structuredTree,
+          processedImagePath: fileInfo.processedImagePath
+        });
+
+        // Attach the AI results to fileInfo so they get saved to MongoDB
+        fileInfo.aiAnalysis = aiAnalysis;
+        fileInfo.aiEnabled = true;
+        console.log('✅ Accessibility Analysis Attached to File Info');
+
+      } catch (aiError) {
+        console.error('⚠️ AI Agent skipped:', aiError.message);
+        fileInfo.aiEnabled = false; 
+        // We continue saving even if AI fails
+      }
+    }
+
     try {
       console.log('\n💾 Saving complete processing results to MongoDB...');
       const document = new Document(fileInfo);
@@ -633,10 +673,91 @@ app.post('/api/upload', upload.single('document'), async (req, res) => {
   }
 });
 
+// Document routes (GET /api/documents, etc.)
 const documentRoutes = require('./routes/documentRoutes');
 app.use('/api/documents', documentRoutes);
 
-// Multer error handling middleware
+// POST /api/documents/:id/chat - RAG Chat endpoint
+app.post('/api/documents/:id/chat', async (req, res) => { 
+  try {
+    const { id } = req.params;
+    const { question } = req.body;
+
+    if (!question) {
+      return res.status(400).json({ 
+        success: false, 
+        error: "Please provide a question." 
+      });
+    }
+
+    console.log(`💬 Answering question for document ${id}: "${question}"`);
+
+    // Fetch document from MongoDB
+    const document = await Document.findById(id); 
+    if (!document) {
+      return res.status(404).json({ 
+        success: false, 
+        error: "Document not found." 
+      });
+    }
+
+    // Extract text (works for both single images and multi-page PDFs)
+    let docText = document.extractedText || '';
+    if (document.pages && document.pages.length > 0) {
+      docText = document.pages
+        .map(p => p.extractedText)
+        .filter(text => text)
+        .join('\n\n--- Page Break ---\n\n');
+    }
+
+    if (!docText || docText.trim().length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: "No text content found in this document."
+      });
+    }
+
+    // Create strict prompt for Groq
+    const prompt = `You are an accessibility assistant helping a user understand a document. 
+Answer the user's question based STRICTLY on the document text provided below. 
+If the answer is not in the text, say "I cannot find that information in the document."
+Keep your answer concise and easy to read out loud.
+
+DOCUMENT TEXT:
+${docText.substring(0, 3000)}${docText.length > 3000 ? '...' : ''}
+
+USER QUESTION: ${question}`;
+
+    // Send to Groq
+    const chatCompletion = await groq.chat.completions.create({
+      messages: [{ role: 'user', content: prompt }],
+      model: 'llama-3.3-70b-versatile',
+      temperature: 0.1,
+      max_tokens: 512
+    });
+
+    const answer = chatCompletion.choices[0]?.message?.content;
+    console.log(`✅ AI Answer: ${answer}`);
+
+    // Send response to frontend
+    res.json({ 
+      success: true, 
+      answer: answer,
+      documentId: id,
+      question: question
+    });
+
+  } catch (error) {
+    console.error('❌ Chat API Error:', error.message);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to process question.',
+      details: error.message 
+    });
+  }
+});
+
+// Multer error handling middleware (FIXED: Added next parameter)
 app.use((error, req, res, next) => {
   if (error instanceof multer.MulterError) {
     if (error.code === 'LIMIT_FILE_SIZE') {
@@ -661,7 +782,6 @@ app.use((error, req, res, next) => {
   next();
 });
 
-
 // 404 handler
 app.use((req, res) => {
   res.status(404).json({
@@ -670,8 +790,7 @@ app.use((req, res) => {
   });
 });
 
-
-// Global error handler
+// Global error handler (FIXED: All 4 parameters at the very bottom)
 app.use((err, req, res, next) => {
   console.error('Server error:', err);
   res.status(500).json({
@@ -693,4 +812,10 @@ process.on('unhandledRejection', (err) => {
   console.error('❌ Unhandled Promise Rejection:', err);
   // Close server & exit process
   process.exit(1);
+});
+
+process.on('SIGINT', () => {
+  console.log('\n🛑 Shutting down server...');
+  // This helps ensure child processes (Python) are cleaned up
+  process.exit();
 });
