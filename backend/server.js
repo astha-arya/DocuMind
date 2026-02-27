@@ -716,6 +716,11 @@ app.post('/api/documents/:id/chat', async (req, res) => {
         error: "No text content found in this document."
       });
     }
+    console.log(`\n🔍 --- DEBUG INFO ---`);
+    console.log(`🔍 Total Text Length Sent to AI: ${docText.length} characters`);
+    console.log(`🔍 Does the text contain '15.': ${docText.includes('15.')}`);
+    console.log(`🔍 Does the text contain 'smother': ${docText.includes('smother')}`);
+    console.log(`🔍 --------------------\n`);
 
     // Create strict prompt for Groq
     const prompt = `You are an accessibility assistant helping a user understand a document. 
@@ -724,7 +729,7 @@ If the answer is not in the text, say "I cannot find that information in the doc
 Keep your answer concise and easy to read out loud.
 
 DOCUMENT TEXT:
-${docText.substring(0, 3000)}${docText.length > 3000 ? '...' : ''}
+${docText}
 
 USER QUESTION: ${question}`;
 
