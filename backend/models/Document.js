@@ -32,6 +32,24 @@ const NodeMetadataSchema = new mongoose.Schema({
   wordCount: Number
 }, { _id: false });
 
+// Sub-schema for Extracted Tables
+const TableSchema = new mongoose.Schema({
+  tableNumber: Number,
+  boundingBox: {
+    x: Number,
+    y: Number,
+    width: Number,
+    height: Number
+  },
+  originalPath: String,
+  cleanPath: String,
+  extractionMethod: String,
+  confidence: Number,
+  text: String,
+  structuredData: mongoose.Schema.Types.Mixed,
+  wordCount: Number
+}, { _id: false });
+
 // Sub-schema for Structure Tree Node
 const StructureNodeSchema = new mongoose.Schema({
   id: {
@@ -40,7 +58,7 @@ const StructureNodeSchema = new mongoose.Schema({
   },
   type: {
     type: String,
-    enum: ['heading', 'content'],
+    enum: ['heading', 'content', 'table'],
     required: true
   },
   text: {
@@ -111,6 +129,7 @@ const PageSchema = new mongoose.Schema({
     type: String,
     default: ''
   },
+  extractedTables: [TableSchema],
   ocrMetadata: OcrMetadataSchema,
   structuredTree: [StructureNodeSchema],
   structureMetadata: StructureMetadataSchema,
@@ -142,6 +161,10 @@ const AggregateStatsSchema = new mongoose.Schema({
     type: Number,
     default: 0,
     min: 0
+  },
+  totalTables: {    
+    type: Number,
+    default: 0
   },
   averageConfidence: {
     type: Number,
@@ -270,6 +293,7 @@ const DocumentSchema = new mongoose.Schema({
   originalDimensions: DimensionsSchema,
   ocrCompleted: Boolean,
   extractedText: String,
+  extractedTables: [TableSchema],
   ocrMetadata: OcrMetadataSchema,
   structuredTree: [StructureNodeSchema],
   structureMetadata: StructureMetadataSchema,
@@ -322,7 +346,22 @@ const DocumentSchema = new mongoose.Schema({
     type: String,
     trim: true,
     lowercase: true
-  }
+  },
+  // CACHE: Stores previous Q&A for this document
+  chatHistory: [{
+    question: { 
+      type: String, 
+      required: true 
+    },
+    answer: { 
+      type: String, 
+      required: true 
+    },
+    askedAt: { 
+      type: Date, 
+      default: Date.now 
+    }
+  }],
 }, {
   timestamps: true, // Adds createdAt and updatedAt automatically
   collection: 'documents'

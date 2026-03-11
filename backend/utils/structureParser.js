@@ -1,6 +1,7 @@
 /**
  * DocuMind Structural Parser
  * Builds hierarchical document trees from raw OCR text
+ * Now supports table injection based on spatial coordinates
  */
 
 /**
@@ -69,11 +70,67 @@ function cleanLine(line) {
 }
 
 /**
- * Build a hierarchical document tree from raw text
+ * Create a table node from extracted table data
+ * @param {Object} table - Extracted table data
+ * @param {number} nodeId - Node ID counter
+ * @returns {Object} - Table node for the tree
+ */
+function createTableNode(table, nodeId) {
+  // Determine display text for the table
+  let displayText = `[TABLE ${table.tableNumber}]`;
+  
+  // Use structured data if available, otherwise fall back to text
+  const hasStructuredData = table.structuredData && 
+                           table.structuredData.rows && 
+                           Array.isArray(table.structuredData.rows);
+  
+  if (hasStructuredData) {
+    // Add row/column info to display text
+    displayText += ` (${table.structuredData.rowCount || table.structuredData.rows.length} rows × ${table.structuredData.columnCount || 0} cols)`;
+  } else if (table.text) {
+    // Count lines in text-based table
+    const lineCount = table.text.split('\n').length;
+    displayText += ` (${lineCount} lines)`;
+  }
+  
+  return {
+    id: `node_${nodeId}`,
+    type: 'table',
+    text: displayText,
+    hint: generateHint(displayText),
+    tableData: {
+      tableNumber: table.tableNumber,
+      boundingBox: table.boundingBox,
+      extractionMethod: table.extractionMethod || 'unknown',
+      confidence: table.confidence || null,
+      
+      // Store structured data if available
+      structuredData: hasStructuredData ? table.structuredData : null,
+      
+      // Store raw text as fallback
+      rawText: table.text || '',
+      
+      // Additional metadata
+      originalPath: table.originalPath || null,
+      cleanPath: table.cleanPath || null,
+      wordCount: table.wordCount || 0
+    },
+    children: [],
+    metadata: {
+      yCoordinate: table.boundingBox.y,
+      charCount: displayText.length,
+      wordCount: table.wordCount || (table.text ? table.text.split(/\s+/).length : 0)
+    }
+  };
+}
+
+/**
+ * Build a hierarchical document tree from raw text with table integration
  * @param {string} rawText - Raw extracted text from OCR
+ * @param {Array} extractedTables - Optional array of extracted table objects
  * @returns {Object} - Structured document tree
  */
-function buildDocumentTree(rawText) {
+function buildDocumentTree(rawText, extractedTables = []) {
   // Handle empty or null text
   if (!rawText || typeof rawText !== 'string') {
     return {
@@ -81,7 +138,8 @@ function buildDocumentTree(rawText) {
         totalNodes: 0,
         totalLines: 0,
         headingCount: 0,
-        contentCount: 0
+        contentCount: 0,
+        tableCount: 0
       },
       tree: []
     };
@@ -96,22 +154,30 @@ function buildDocumentTree(rawText) {
         totalNodes: 0,
         totalLines: 0,
         headingCount: 0,
-        contentCount: 0
+        contentCount: 0,
+        tableCount: 0
       },
       tree: []
     };
   }
   
-  // Build the tree structure
+  // Build the initial tree structure from text
   const tree = [];
   let currentParent = null;
   let nodeIdCounter = 0;
   let headingCount = 0;
   let contentCount = 0;
   
+  // Create nodes with estimated Y-coordinates (line-based approximation)
+  // Assume each line is approximately 20-30 pixels tall
+  const APPROXIMATE_LINE_HEIGHT = 25;
+  
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     nodeIdCounter++;
+    
+    // Estimate Y-coordinate based on line number
+    const estimatedY = i * APPROXIMATE_LINE_HEIGHT;
     
     if (isHeading(line)) {
       // This is a heading - create a parent node
@@ -126,6 +192,7 @@ function buildDocumentTree(rawText) {
         children: [],
         metadata: {
           lineNumber: i + 1,
+          estimatedY: estimatedY,
           charCount: line.length,
           wordCount: line.split(/\s+/).length
         }
@@ -146,6 +213,7 @@ function buildDocumentTree(rawText) {
         hint: generateHint(line),
         metadata: {
           lineNumber: i + 1,
+          estimatedY: estimatedY,
           charCount: line.length,
           wordCount: line.split(/\s+/).length
         }
@@ -161,12 +229,94 @@ function buildDocumentTree(rawText) {
     }
   }
   
+  // ========================================
+  // INJECT TABLES BASED ON Y-COORDINATES
+  // ========================================
+  
+  let tableCount = 0;
+  
+  if (extractedTables && Array.isArray(extractedTables) && extractedTables.length > 0) {
+    console.log(`\n📊 Injecting ${extractedTables.length} table(s) into document tree...`);
+    
+    // Sort tables by Y-coordinate (top to bottom)
+    const sortedTables = [...extractedTables].sort((a, b) => 
+      (a.boundingBox?.y || 0) - (b.boundingBox?.y || 0)
+    );
+    
+    for (const table of sortedTables) {
+      nodeIdCounter++;
+      tableCount++;
+      
+      const tableNode = createTableNode(table, nodeIdCounter);
+      const tableY = table.boundingBox.y;
+      
+      console.log(`  📍 Table ${table.tableNumber} at Y=${tableY}`);
+      
+      // Find the correct position to inject this table
+      let injected = false;
+      
+      // Try to find the most appropriate parent heading
+      for (let i = 0; i < tree.length; i++) {
+        const node = tree[i];
+        
+        if (node.type === 'heading') {
+          const headingY = node.metadata.estimatedY;
+          
+          // Check if table should go under this heading
+          // (table Y is after heading, but before next heading)
+          const nextHeading = tree.find((n, idx) => idx > i && n.type === 'heading');
+          const nextHeadingY = nextHeading ? nextHeading.metadata.estimatedY : Infinity;
+          
+          if (tableY >= headingY && tableY < nextHeadingY) {
+            // Table belongs under this heading
+            
+            // Find exact position within children based on Y-coordinate
+            let insertIndex = node.children.length;
+            
+            for (let j = 0; j < node.children.length; j++) {
+              const childY = node.children[j].metadata.estimatedY || node.children[j].metadata.yCoordinate || 0;
+              
+              if (tableY < childY) {
+                insertIndex = j;
+                break;
+              }
+            }
+            
+            // Insert table at the calculated position
+            node.children.splice(insertIndex, 0, tableNode);
+            injected = true;
+            console.log(`  ✅ Injected under heading: "${node.hint}"`);
+            break;
+          }
+        }
+      }
+      
+      // If table wasn't injected under a heading, add it at the appropriate top-level position
+      if (!injected) {
+        let insertIndex = tree.length;
+        
+        for (let i = 0; i < tree.length; i++) {
+          const nodeY = tree[i].metadata.estimatedY || tree[i].metadata.yCoordinate || 0;
+          
+          if (tableY < nodeY) {
+            insertIndex = i;
+            break;
+          }
+        }
+        
+        tree.splice(insertIndex, 0, tableNode);
+        console.log(`  ✅ Injected at top level (position ${insertIndex})`);
+      }
+    }
+  }
+  
   return {
     metadata: {
       totalNodes: nodeIdCounter,
       totalLines: lines.length,
       headingCount: headingCount,
       contentCount: contentCount,
+      tableCount: tableCount,
       averageLineLength: Math.round(
         lines.reduce((sum, line) => sum + line.length, 0) / lines.length
       ),
@@ -209,9 +359,9 @@ function flattenTree(tree) {
 }
 
 /**
- * Get navigation map - list of all headings for quick access
+ * Get navigation map - list of all headings and tables for quick access
  * @param {Array} tree - The document tree
- * @returns {Array} - Array of heading nodes with navigation info
+ * @returns {Array} - Array of heading and table nodes with navigation info
  */
 function getNavigationMap(tree) {
   const navMap = [];
@@ -220,17 +370,31 @@ function getNavigationMap(tree) {
     for (let i = 0; i < nodes.length; i++) {
       const node = nodes[i];
       
-      if (node.type === 'heading') {
+      // Include headings and tables in navigation
+      if (node.type === 'heading' || node.type === 'table') {
         const currentPath = [...path, node.hint];
-        navMap.push({
+        
+        const navEntry = {
           id: node.id,
+          type: node.type,
           text: node.text,
           hint: node.hint,
           path: currentPath,
           pathString: currentPath.join(' > '),
-          childCount: node.children ? node.children.length : 0,
-          lineNumber: node.metadata.lineNumber
-        });
+          childCount: node.children ? node.children.length : 0
+        };
+        
+        // Add table-specific navigation info
+        if (node.type === 'table') {
+          navEntry.tableNumber = node.tableData?.tableNumber;
+          navEntry.hasStructuredData = node.tableData?.structuredData !== null;
+          navEntry.extractionMethod = node.tableData?.extractionMethod;
+        } else {
+          // Headings have line numbers
+          navEntry.lineNumber = node.metadata.lineNumber;
+        }
+        
+        navMap.push(navEntry);
         
         // Recursively process children
         if (node.children && node.children.length > 0) {
@@ -245,7 +409,7 @@ function getNavigationMap(tree) {
 }
 
 /**
- * Search within the document tree
+ * Search within the document tree (including tables)
  * @param {Array} tree - The document tree
  * @param {string} searchTerm - Term to search for
  * @returns {Array} - Matching nodes
@@ -260,16 +424,37 @@ function searchTree(tree, searchTerm) {
   
   function traverse(nodes) {
     for (const node of nodes) {
+      let matchFound = false;
+      
       // Check if node text contains search term
       if (node.text.toLowerCase().includes(lowerSearch)) {
-        results.push({
+        matchFound = true;
+      }
+      
+      // For table nodes, also search in raw text
+      if (node.type === 'table' && node.tableData?.rawText) {
+        if (node.tableData.rawText.toLowerCase().includes(lowerSearch)) {
+          matchFound = true;
+        }
+      }
+      
+      if (matchFound) {
+        const result = {
           id: node.id,
           type: node.type,
           text: node.text,
           hint: node.hint,
-          matchType: node.type === 'heading' ? 'heading' : 'content',
-          lineNumber: node.metadata.lineNumber
-        });
+          matchType: node.type
+        };
+        
+        // Add type-specific info
+        if (node.type === 'table') {
+          result.tableNumber = node.tableData?.tableNumber;
+        } else if (node.type === 'heading' || node.type === 'content') {
+          result.lineNumber = node.metadata.lineNumber;
+        }
+        
+        results.push(result);
       }
       
       // Recursively search children
@@ -284,13 +469,14 @@ function searchTree(tree, searchTerm) {
 }
 
 /**
- * Get statistics about the document structure
+ * Get statistics about the document structure (including tables)
  * @param {Array} tree - The document tree
  * @returns {Object} - Document statistics
  */
 function getDocumentStats(tree) {
   let totalHeadings = 0;
   let totalContent = 0;
+  let totalTables = 0;
   let maxDepth = 0;
   let totalWords = 0;
   let totalChars = 0;
@@ -301,12 +487,14 @@ function getDocumentStats(tree) {
     for (const node of nodes) {
       if (node.type === 'heading') {
         totalHeadings++;
-      } else {
+      } else if (node.type === 'content') {
         totalContent++;
+      } else if (node.type === 'table') {
+        totalTables++;
       }
       
-      totalWords += node.metadata.wordCount;
-      totalChars += node.metadata.charCount;
+      totalWords += node.metadata.wordCount || 0;
+      totalChars += node.metadata.charCount || 0;
       
       // Recursively traverse children
       if (node.children && node.children.length > 0) {
@@ -320,11 +508,12 @@ function getDocumentStats(tree) {
   return {
     headings: totalHeadings,
     contentNodes: totalContent,
-    totalNodes: totalHeadings + totalContent,
+    tables: totalTables,
+    totalNodes: totalHeadings + totalContent + totalTables,
     maxDepth: maxDepth,
     totalWords: totalWords,
     totalCharacters: totalChars,
-    averageWordsPerNode: totalWords / (totalHeadings + totalContent) || 0
+    averageWordsPerNode: totalWords / (totalHeadings + totalContent + totalTables) || 0
   };
 }
 
@@ -336,5 +525,6 @@ module.exports = {
   searchTree,
   getDocumentStats,
   isHeading,
-  generateHint
+  generateHint,
+  createTableNode
 };

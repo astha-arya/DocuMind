@@ -2,6 +2,7 @@
 """
 DocuMind Image Preprocessing Script
 Enhances images for better OCR accuracy using OpenCV
+Now includes table detection and extraction
 """
 
 import cv2
@@ -12,9 +13,167 @@ from pathlib import Path
 import numpy as np
 
 
+def detect_and_extract_tables(image, output_dir, base_filename):
+    """
+    Detect and extract tables from document image using morphological operations.
+    
+    This function:
+    1. Detects table structures by finding intersecting horizontal and vertical lines
+    2. Saves each table as a separate cropped image
+    3. Creates a 'clean' version with grid lines removed for better OCR
+    
+    Args:
+        image (numpy.ndarray): Input image (BGR format)
+        output_dir (str): Directory to save extracted tables
+        base_filename (str): Base filename for naming extracted tables
+        
+    Returns:
+        list: Array of detected tables with metadata
+    """
+    try:
+        # Convert to grayscale for processing
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        
+        # Apply binary thresholding
+        _, binary = cv2.threshold(gray, 128, 255, cv2.THRESH_BINARY_INV)
+        
+        # Define structure elements for detecting horizontal and vertical lines
+        # Adjust these values based on your table line thickness
+        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 1))
+        vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 40))
+        
+        # Detect horizontal lines
+        horizontal_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, horizontal_kernel, iterations=2)
+        
+        # Detect vertical lines
+        vertical_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, vertical_kernel, iterations=2)
+        
+        # Combine horizontal and vertical lines to get table structure
+        table_mask = cv2.addWeighted(horizontal_lines, 0.5, vertical_lines, 0.5, 0.0)
+        
+        # Enhance the table mask
+        _, table_mask = cv2.threshold(table_mask, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        
+        # Find contours of potential tables
+        contours, _ = cv2.findContours(table_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        tables_found = []
+        table_count = 0
+        
+        # Minimum area threshold to filter out noise (adjust as needed)
+        min_table_area = 5000
+        
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            
+            # Filter by area to get only significant tables
+            if area > min_table_area:
+                table_count += 1
+                
+                # Get bounding box coordinates
+                x, y, w, h = cv2.boundingRect(contour)
+                
+                # Add padding around the table (10 pixels)
+                padding = 10
+                x_padded = max(0, x - padding)
+                y_padded = max(0, y - padding)
+                w_padded = min(image.shape[1] - x_padded, w + 2 * padding)
+                h_padded = min(image.shape[0] - y_padded, h + 2 * padding)
+                
+                # Crop the table region from original image
+                table_crop = image[y_padded:y_padded + h_padded, x_padded:x_padded + w_padded]
+                
+                # Save the original table crop
+                table_filename = f"{base_filename}_table_{table_count}.png"
+                table_path = os.path.join(output_dir, table_filename)
+                cv2.imwrite(table_path, table_crop)
+                
+                # Create clean version (remove grid lines)
+                table_clean = remove_table_lines(table_crop)
+                
+                # Save the clean version
+                table_clean_filename = f"{base_filename}_table_{table_count}_clean.png"
+                table_clean_path = os.path.join(output_dir, table_clean_filename)
+                cv2.imwrite(table_clean_path, table_clean)
+                
+                # Store table metadata
+                table_info = {
+                    "table_number": table_count,
+                    "original_path": table_path,
+                    "clean_path": table_clean_path,
+                    "bounding_box": {
+                        "x": int(x_padded),
+                        "y": int(y_padded),
+                        "width": int(w_padded),
+                        "height": int(h_padded)
+                    },
+                    "area": int(area)
+                }
+                
+                tables_found.append(table_info)
+        
+        return tables_found
+        
+    except Exception as e:
+        # If table detection fails, log but don't crash
+        print(f"Warning: Table detection failed: {str(e)}", file=sys.stderr)
+        return []
+
+
+def remove_table_lines(table_image):
+    """
+    Remove horizontal and vertical grid lines from table image.
+    This helps Tesseract read the table content better.
+    
+    Args:
+        table_image (numpy.ndarray): Cropped table image
+        
+    Returns:
+        numpy.ndarray: Table image with grid lines removed
+    """
+    try:
+        # Convert to grayscale
+        gray = cv2.cvtColor(table_image, cv2.COLOR_BGR2GRAY)
+        
+        # Apply binary thresholding
+        _, binary = cv2.threshold(gray, 128, 255, cv2.THRESH_BINARY_INV)
+        
+        # Detect horizontal lines
+        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 1))
+        horizontal_lines_mask = cv2.morphologyEx(binary, cv2.MORPH_OPEN, horizontal_kernel, iterations=2)
+        
+        # Detect vertical lines
+        vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 40))
+        vertical_lines_mask = cv2.morphologyEx(binary, cv2.MORPH_OPEN, vertical_kernel, iterations=2)
+        
+        # Combine both line masks
+        lines_mask = cv2.addWeighted(horizontal_lines_mask, 1, vertical_lines_mask, 1, 0.0)
+        
+        # Dilate the lines mask slightly to ensure complete removal
+        dilate_kernel = np.ones((3, 3), np.uint8)
+        lines_mask = cv2.dilate(lines_mask, dilate_kernel, iterations=1)
+        
+        # Create a copy of the original image
+        result = table_image.copy()
+        
+        # Convert mask to BGR for proper replacement
+        lines_mask_bgr = cv2.cvtColor(lines_mask, cv2.COLOR_GRAY2BGR)
+        
+        # Replace line pixels with white background
+        result[lines_mask_bgr > 0] = 255
+        
+        return result
+        
+    except Exception as e:
+        # If line removal fails, return original image
+        print(f"Warning: Table line removal failed: {str(e)}", file=sys.stderr)
+        return table_image
+
+
 def preprocess_image(input_path):
     """
     Preprocess an image for OCR using:
+    - Table detection and extraction (NEW)
     - Image scaling (2x upscaling for better resolution)
     - Grayscale conversion
     - Gaussian Blur (noise reduction)
@@ -40,6 +199,22 @@ def preprocess_image(input_path):
         
         # Get original dimensions
         original_height, original_width = image.shape[:2]
+        
+        # Get output directory and base filename
+        input_dir = os.path.dirname(input_path)
+        input_filename = os.path.basename(input_path)
+        name_without_ext = os.path.splitext(input_filename)[0]
+        
+        # ========================================
+        # NEW: TABLE DETECTION AND EXTRACTION
+        # ========================================
+        print("Detecting tables...", file=sys.stderr)
+        tables_detected = detect_and_extract_tables(image, input_dir, name_without_ext)
+        print(f"Found {len(tables_detected)} table(s)", file=sys.stderr)
+        
+        # ========================================
+        # EXISTING: MAIN IMAGE PREPROCESSING
+        # ========================================
         
         # Step 1: Scale image 2x for better OCR accuracy
         # Using INTER_CUBIC for high-quality upscaling
@@ -73,18 +248,13 @@ def preprocess_image(input_path):
         kernel = np.ones((2, 2), np.uint8)
         dilated = cv2.dilate(threshold, kernel, iterations=1)
         
-        # Optional: Apply opening (erosion followed by dilation) to remove noise
+        # Step 6: Apply opening (erosion followed by dilation) to remove noise
         # This helps clean up small specks while keeping text intact
         opening_kernel = np.ones((2, 2), np.uint8)
         final_image = cv2.morphologyEx(dilated, cv2.MORPH_OPEN, opening_kernel)
         
-        # Generate output filename
-        input_filename = os.path.basename(input_path)
-        name_without_ext = os.path.splitext(input_filename)[0]
+        # Generate output filename for main processed image
         output_filename = f"processed_{name_without_ext}.jpg"
-        
-        # Save in the same directory as input (uploads folder)
-        input_dir = os.path.dirname(input_path)
         output_path = os.path.join(input_dir, output_filename)
         
         # Save the processed image with high quality
@@ -108,13 +278,16 @@ def preprocess_image(input_path):
             },
             "scaling_factor": 2.0,
             "preprocessing_steps": [
+                "Table Detection and Extraction",
                 "2x Image Scaling (INTER_CUBIC)",
                 "Grayscale conversion",
                 "Gaussian Blur (5x5 kernel)",
                 "Otsu's Thresholding",
                 "Dilation (2x2 kernel, 1 iteration)",
                 "Morphological Opening (noise removal)"
-            ]
+            ],
+            "tables_detected": tables_detected,
+            "table_count": len(tables_detected)
         }
         
         # Print JSON result to stdout (Node.js will capture this)
