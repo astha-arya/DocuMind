@@ -932,16 +932,34 @@ app.post('/api/upload', upload.single('document'), async (req, res) => {
       console.error('❌ MongoDB save error:', dbError.message);
     }
     
-    // FINAL CLEANUP: Delete the Original Uploaded File
+    // FINAL CLEANUP: Delete Original Upload AND Python Temporary Images
     try {
-      if (req.file && req.file.path && fs.existsSync(req.file.path)) {
-        fs.unlinkSync(req.file.path);
-        console.log(`🗑️  Successfully deleted original uploaded file: ${req.file.filename}`);
+      const fs = require('fs');
+      const path = require('path');
+
+      if (req.file) {
+        // 1. Delete the original uploaded file
+        if (fs.existsSync(req.file.path)) {
+          fs.unlinkSync(req.file.path);
+          console.log(`🗑️ Deleted original file: ${req.file.filename}`);
+        }
+
+        // 2. Get the base name without the extension (e.g., "document-123" instead of "document-123.jpg")
+        const baseName = path.parse(req.file.filename).name;
+        const uploadDir = req.file.destination;
+        const files = fs.readdirSync(uploadDir);
+        
+        // 3. Sweep the folder for ANY leftovers belonging to this base name
+        files.forEach(file => {
+          if (file.includes(baseName) && file !== req.file.filename) {
+            fs.unlinkSync(path.join(uploadDir, file));
+            console.log(`🗑️ Cleaned up Python leftover: ${file}`);
+          }
+        });
       }
     } catch (cleanupError) {
-      console.error(`⚠️  Failed to delete original file: ${cleanupError.message}`);
+      console.error(`⚠️ Failed during cleanup: ${cleanupError.message}`);
     }
-
     // Return success response with all processing results
     res.status(200).json({
       success: true,
