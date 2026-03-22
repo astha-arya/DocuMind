@@ -11,6 +11,7 @@ import {
   X,
   Mic,
   MicOff,
+  Loader2
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -24,7 +25,8 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 
-const API_BASE_URL = "http://localhost:5001";
+// Use environment variable if available, otherwise default to local backend
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5001";
 
 interface Message {
   id: string;
@@ -33,21 +35,30 @@ interface Message {
 }
 
 interface DocumentListItem {
-  id: string;
-  name: string;
-  uploadedAt: string;
+  _id: string; // MongoDB uses _id
+  originalName: string;
+  uploadDate: string;
 }
 
+// --- UPGRADED AI INTERFACE ---
 interface DocumentDetail {
-  id: string;
-  name: string;
-  uploadedAt: string;
-  structuredTree: unknown;
-  aiAnalysis: {
-    summary: string;
-    pages?: { pageNumber: number; summary: string }[];
+  _id: string;
+  originalName: string;
+  uploadDate: string;
+  extractedText: string;
+  aiAnalysis?: {
+    pages?: {
+      pageNumber: number;
+      visionAnalysis?: {
+        layoutNotes?: string;
+      };
+      audioNavigation?: {
+        audioIntro?: string;
+        navigationHints?: { summary: string }[];
+      };
+    }[];
   };
-  chatHistory: Message[];
+  chatHistory?: Message[];
 }
 
 export default function DocuMindPage() {
@@ -66,32 +77,33 @@ export default function DocuMindPage() {
   const [inputValue, setInputValue] = useState("");
   const [isUploadDialogOpen, setIsUploadDialogOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [isUploading, setIsUploading] = useState(false); // New state for upload
   const [isRecording, setIsRecording] = useState(false);
   const [currentPageIndex, setCurrentPageIndex] = useState(0);
   const [lastAnnouncement, setLastAnnouncement] = useState("");
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatInputRef = useRef<HTMLInputElement>(null);
-  const recognitionRef = useRef<SpeechRecognition | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null); // New ref for hidden file input
+  const recognitionRef = useRef<any>(null);
   const speechSynthesisRef = useRef<SpeechSynthesisUtterance | null>(null);
 
   // Fetch documents list on mount
-  useEffect(() => {
-    const fetchDocuments = async () => {
-      try {
-        const response = await fetch(`${API_BASE_URL}/api/documents`);
-        if (response.ok) {
-          const data = await response.json();
-          setDocuments(data);
-          // Auto-select first document if available
-          if (data.length > 0) {
-            fetchDocumentDetail(data[0].id);
-          }
-        }
-      } catch (error) {
-        console.error("Failed to fetch documents:", error);
+  const fetchDocuments = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/documents`);
+      if (response.ok) {
+        const data = await response.json();
+        // The backend returns { success: true, count: X, data: [...] }
+        const docs = data.data || [];
+        setDocuments(docs);
       }
-    };
+    } catch (error) {
+      console.error("Failed to fetch documents:", error);
+    }
+  };
+
+  useEffect(() => {
     fetchDocuments();
   }, []);
 
@@ -101,17 +113,27 @@ export default function DocuMindPage() {
     try {
       const response = await fetch(`${API_BASE_URL}/api/documents/${docId}`);
       if (response.ok) {
-        const data: DocumentDetail = await response.json();
-        setSelectedDocument(data);
+        const data = await response.json();
+        const doc = data.data || data;
+        setSelectedDocument(doc);
+        
+        // --- DATA TRANSLATOR: Convert MongoDB Chat to Next.js Chat ---
+        const formattedChat: Message[] = [];
+        if (doc.chatHistory && Array.isArray(doc.chatHistory)) {
+          doc.chatHistory.forEach((chat: any, index: number) => {
+            formattedChat.push({ id: `user-${index}`, role: "user", content: chat.question });
+            formattedChat.push({ id: `bot-${index}`, role: "assistant", content: chat.answer });
+          });
+        }
+
         setMessages(
-          data.chatHistory.length > 0
-            ? data.chatHistory
+          formattedChat.length > 0
+            ? formattedChat
             : [
                 {
                   id: "welcome",
                   role: "assistant",
-                  content:
-                    "Hello! I'm DocuMind, your document assistant. I can help you understand and navigate your uploaded documents. What would you like to know?",
+                  content: `I have loaded "${doc.originalName || doc.filename}". What would you like to know?`,
                 },
               ]
         );
@@ -124,14 +146,72 @@ export default function DocuMindPage() {
     }
   };
 
-  // Text-to-Speech: Speak text
+  // --- Handle Actual File Upload ---
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setIsUploading(true);
+    const formData = new FormData();
+    // MATCH 1: Backend multer expects 'document', not 'file'
+    formData.append("document", file); 
+
+    try {
+      // MATCH 2: Backend URL is /api/upload
+      const response = await fetch(`${API_BASE_URL}/api/upload`, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        setIsUploadDialogOpen(false);
+        await fetchDocuments(); // Refresh the sidebar
+        
+        // Auto-select the newly uploaded document
+        if (result.file && result.file._id) {
+          fetchDocumentDetail(result.file._id);
+        }
+      } else {
+        const errorData = await response.json();
+        console.error("Upload failed", errorData);
+        alert(`Upload failed: ${errorData.message || 'Unknown error'}`);
+      }
+    } catch (error) {
+      console.error("Error uploading file:", error);
+      alert("Error connecting to server.");
+    } finally {
+      setIsUploading(false);
+      // Reset input so you can upload the same file again if needed
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
+  // Text-to-Speech: Speak text with Natural Voice
   const speak = useCallback(
     (text: string, onEnd?: () => void) => {
       if (!isSpeechEnabled || typeof window === "undefined") return;
 
       window.speechSynthesis.cancel();
       const utterance = new SpeechSynthesisUtterance(text);
-      utterance.rate = 0.9;
+
+      // --- VOICE UPGRADE LOGIC ---
+      const voices = window.speechSynthesis.getVoices();
+      
+      // Hunt for a high-quality natural voice (Mac/Windows/Chrome)
+      const naturalVoice = voices.find(v => 
+        v.name.includes("Samantha") || // Apple's natural female
+        v.name.includes("Daniel") ||   // Apple's natural UK male
+        v.name.includes("Google US English") || 
+        v.name.includes("Premium") ||  // High-quality system voices
+        v.name.includes("Natural")
+      );
+
+      if (naturalVoice) {
+        utterance.voice = naturalVoice;
+      }
+
+      utterance.rate = 0.95; // Slightly slower feels more conversational
       utterance.pitch = 1;
       utterance.volume = 1;
 
@@ -149,21 +229,30 @@ export default function DocuMindPage() {
   // Auto-speak summary when document loads and speech is enabled
   useEffect(() => {
     if (selectedDocument && isSpeechEnabled) {
-      const summary = selectedDocument.aiAnalysis?.summary;
-      if (summary) {
-        speak(summary, () => {
-          // After summary finishes, ask about Page 1
-          const pages = selectedDocument.aiAnalysis?.pages;
-          if (pages && pages.length > 0) {
-            setTimeout(() => {
-              speak("Would you like to hear the summary for Page 1?");
-            }, 500);
-          }
-        });
+      const pages = selectedDocument.aiAnalysis?.pages;
+      
+      if (pages && pages.length > 0) {
+        // Grab the beautiful audioIntro from your backend
+        const firstPageIntro = pages[0].audioNavigation?.audioIntro;
+        
+        if (firstPageIntro) {
+          speak(firstPageIntro, () => {
+            // After reading the intro, give instructions based on page count
+            if (pages.length > 1) {
+              setTimeout(() => {
+                speak("Would you like to hear the next page? Use your right arrow key to proceed.");
+              }, 500);
+            } else {
+              setTimeout(() => {
+                speak("I have loaded the sections for this page. What would you like to know?");
+              }, 500);
+            }
+          });
+        }
       }
     }
   }, [selectedDocument, isSpeechEnabled, speak]);
-
+  
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -173,16 +262,16 @@ export default function DocuMindPage() {
   useEffect(() => {
     if (typeof window !== "undefined") {
       const SpeechRecognition =
-        window.SpeechRecognition || window.webkitSpeechRecognition;
+        (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
       if (SpeechRecognition) {
         const recognition = new SpeechRecognition();
         recognition.continuous = false;
         recognition.interimResults = false;
         recognition.lang = "en-US";
 
-        recognition.onresult = (event: SpeechRecognitionEvent) => {
+        recognition.onresult = (event: any) => {
           const transcript = event.results[0][0].transcript;
-          setInputValue((prev) => prev + transcript);
+          setInputValue((prev) => prev + " " + transcript);
           setIsRecording(false);
         };
 
@@ -202,7 +291,6 @@ export default function DocuMindPage() {
   // Keyboard navigation
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Don't trigger if user is typing in input
       if (
         document.activeElement?.tagName === "INPUT" ||
         document.activeElement?.tagName === "TEXTAREA"
@@ -214,27 +302,24 @@ export default function DocuMindPage() {
 
       switch (e.key) {
         case "ArrowRight":
-          // Next page summary
           if (pages && currentPageIndex < pages.length - 1) {
             e.preventDefault();
             const nextIndex = currentPageIndex + 1;
             setCurrentPageIndex(nextIndex);
-            const pageText = `Page ${pages[nextIndex].pageNumber}: ${pages[nextIndex].summary}`;
-            speak(pageText);
+            const nextIntro = pages[nextIndex].audioNavigation?.audioIntro || `Page ${pages[nextIndex].pageNumber}`;
+            speak(nextIntro);
           }
           break;
         case "ArrowLeft":
-          // Previous page summary
           if (pages && currentPageIndex > 0) {
             e.preventDefault();
             const prevIndex = currentPageIndex - 1;
             setCurrentPageIndex(prevIndex);
-            const pageText = `Page ${pages[prevIndex].pageNumber}: ${pages[prevIndex].summary}`;
-            speak(pageText);
+            const prevIntro = pages[prevIndex].audioNavigation?.audioIntro || `Page ${pages[prevIndex].pageNumber}`;
+            speak(prevIntro);
           }
           break;
         case " ":
-          // Spacebar: Repeat last announcement
           if (!e.shiftKey && lastAnnouncement) {
             e.preventDefault();
             speak(lastAnnouncement);
@@ -264,13 +349,14 @@ export default function DocuMindPage() {
 
     try {
       const response = await fetch(
-        `${API_BASE_URL}/api/documents/${selectedDocument.id}/chat`,
+        `${API_BASE_URL}/api/documents/${selectedDocument._id}/chat`,
         {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({ message: questionText }),
+          // MATCH 3: Backend expects { question: "..." }
+          body: JSON.stringify({ question: questionText }), 
         }
       );
 
@@ -279,7 +365,8 @@ export default function DocuMindPage() {
         const assistantMessage: Message = {
           id: (Date.now() + 1).toString(),
           role: "assistant",
-          content: data.response || data.message || "I received your question.",
+          // Backend returns 'answer', not 'response' or 'message'
+          content: data.answer || "I received your question but couldn't generate an answer.",
         };
         setMessages((prev) => [...prev, assistantMessage]);
 
@@ -294,6 +381,7 @@ export default function DocuMindPage() {
           content: "Sorry, I encountered an error processing your request.",
         };
         setMessages((prev) => [...prev, errorMessage]);
+        if (isSpeechEnabled) speak(errorMessage.content);
       }
     } catch (error) {
       console.error("Failed to send message:", error);
@@ -303,6 +391,7 @@ export default function DocuMindPage() {
         content: "Sorry, I couldn't connect to the server. Please try again.",
       };
       setMessages((prev) => [...prev, errorMessage]);
+      if (isSpeechEnabled) speak(errorMessage.content);
     } finally {
       setIsLoading(false);
     }
@@ -324,11 +413,10 @@ export default function DocuMindPage() {
     }
 
     if (newState && selectedDocument) {
-      // Speak the current summary when turning on
-      const summary = selectedDocument.aiAnalysis?.summary;
-      if (summary) {
+      const intro = selectedDocument.aiAnalysis?.pages?.[currentPageIndex]?.audioNavigation?.audioIntro;
+      if (intro) {
         setTimeout(() => {
-          speak(summary);
+          speak(intro);
         }, 100);
       }
     }
@@ -349,14 +437,8 @@ export default function DocuMindPage() {
     }
   };
 
-  const selectDocument = (doc: DocumentListItem) => {
-    fetchDocumentDetail(doc.id);
-    setIsSidebarOpen(false);
-  };
-
   return (
     <div className="flex h-screen bg-[#000000] text-[#FFFFFF]">
-      {/* Skip to Chat Link - Visually Hidden but accessible to screen readers */}
       <a
         href="#chat-input"
         className="sr-only focus:not-sr-only focus:absolute focus:top-4 focus:left-4 focus:z-50 focus:px-4 focus:py-2 focus:bg-[#FFFF00] focus:text-[#000000] focus:font-bold focus:rounded-md focus:ring-4 focus:ring-[#FFFFFF] focus:outline-none"
@@ -365,7 +447,6 @@ export default function DocuMindPage() {
         Skip to Chat
       </a>
 
-      {/* Mobile Sidebar Overlay */}
       {isSidebarOpen && (
         <div
           className="fixed inset-0 bg-black/70 z-40 lg:hidden"
@@ -383,7 +464,6 @@ export default function DocuMindPage() {
         role="complementary"
       >
         <div className="flex flex-col h-full">
-          {/* Sidebar Header */}
           <div className="flex items-center justify-between p-4 border-b border-[#333333]">
             <h2 className="text-xl font-bold text-[#FFFFFF]">Documents</h2>
             <Button
@@ -399,10 +479,7 @@ export default function DocuMindPage() {
 
           {/* Upload Button */}
           <div className="p-4">
-            <Dialog
-              open={isUploadDialogOpen}
-              onOpenChange={setIsUploadDialogOpen}
-            >
+            <Dialog open={isUploadDialogOpen} onOpenChange={setIsUploadDialogOpen}>
               <DialogTrigger asChild>
                 <Button
                   className="w-full h-14 text-lg font-semibold bg-[#FFFFFF] text-[#000000] hover:bg-[#e0e0e0] focus:ring-4 focus:ring-[#FFFF00] focus:outline-none"
@@ -421,25 +498,40 @@ export default function DocuMindPage() {
                     Select a document file to upload and analyze
                   </DialogDescription>
                 </DialogHeader>
+                
+                {/* HIDDEN FILE INPUT */}
+                <input 
+                  type="file" 
+                  ref={fileInputRef} 
+                  onChange={handleFileUpload} 
+                  accept="application/pdf,image/png,image/jpeg,image/jpg" 
+                  className="hidden" 
+                />
+
                 <div className="space-y-4 pt-4">
                   <div className="border-2 border-dashed border-[#333333] rounded-lg p-8 text-center hover:border-[#FFFFFF] transition-colors">
-                    <FileText
-                      className="size-12 mx-auto mb-4 text-[#a0a0a0]"
-                      aria-hidden="true"
-                    />
+                    {isUploading ? (
+                      <Loader2 className="size-12 mx-auto mb-4 text-[#FFFF00] animate-spin" aria-hidden="true" />
+                    ) : (
+                      <FileText className="size-12 mx-auto mb-4 text-[#a0a0a0]" aria-hidden="true" />
+                    )}
+                    
                     <p className="text-lg mb-2">
-                      Drag and drop your file here
+                      {isUploading ? "Uploading & Analyzing..." : "Drag and drop your file here"}
                     </p>
-                    <p className="text-[#a0a0a0] mb-4">or</p>
+                    {!isUploading && <p className="text-[#a0a0a0] mb-4">or</p>}
+                    
                     <Button
-                      className="h-12 px-6 text-lg bg-[#FFFFFF] text-[#000000] hover:bg-[#e0e0e0] focus:ring-4 focus:ring-[#FFFF00] focus:outline-none"
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={isUploading}
+                      className="h-12 px-6 text-lg bg-[#FFFFFF] text-[#000000] hover:bg-[#e0e0e0] focus:ring-4 focus:ring-[#FFFF00] focus:outline-none disabled:opacity-50"
                       aria-label="Browse files to upload"
                     >
-                      Browse Files
+                      {isUploading ? "Please Wait..." : "Browse Files"}
                     </Button>
                   </div>
                   <p className="text-sm text-[#a0a0a0]">
-                    Supported formats: PDF, DOCX, TXT (Max 10MB)
+                    Supported formats: PDF, PNG, JPG (Max 10MB)
                   </p>
                 </div>
               </DialogContent>
@@ -451,30 +543,28 @@ export default function DocuMindPage() {
             <nav aria-label="Document list">
               <ul className="space-y-2 pb-4" role="list">
                 {documents.map((doc) => (
-                  <li key={doc.id}>
+                  <li key={doc._id}>
                     <button
-                      onClick={() => selectDocument(doc)}
+                      onClick={() => {
+                        fetchDocumentDetail(doc._id);
+                        setIsSidebarOpen(false);
+                      }}
                       className={`w-full text-left p-4 rounded-lg transition-colors focus:ring-4 focus:ring-[#FFFF00] focus:outline-none ${
-                        selectedDocument?.id === doc.id
+                        selectedDocument?._id === doc._id
                           ? "bg-[#333333] border-2 border-[#FFFFFF]"
                           : "bg-[#1a1a1a] hover:bg-[#262626] border-2 border-transparent"
                       }`}
-                      aria-label={`Select document: ${doc.name}, uploaded on ${new Date(doc.uploadedAt).toLocaleDateString()}`}
-                      aria-current={
-                        selectedDocument?.id === doc.id ? "true" : undefined
-                      }
+                      aria-label={`Select document: ${doc.originalName || "Document"}`}
+                      aria-current={selectedDocument?._id === doc._id ? "true" : undefined}
                     >
                       <div className="flex items-start gap-3">
-                        <FileText
-                          className="size-6 mt-1 shrink-0"
-                          aria-hidden="true"
-                        />
+                        <FileText className="size-6 mt-1 shrink-0" aria-hidden="true" />
                         <div className="min-w-0 flex-1">
                           <p className="font-semibold text-lg truncate text-[#FFFFFF]">
-                            {doc.name}
+                            {doc.originalName || "Unnamed Document"}
                           </p>
                           <p className="text-sm text-[#a0a0a0]">
-                            {new Date(doc.uploadedAt).toLocaleDateString()}
+                            {doc.uploadDate ? new Date(doc.uploadDate).toLocaleDateString() : "Just now"}
                           </p>
                         </div>
                       </div>
@@ -494,7 +584,6 @@ export default function DocuMindPage() {
 
       {/* Main Content */}
       <main className="flex-1 flex flex-col min-w-0" role="main">
-        {/* Header */}
         <header className="flex items-center justify-between p-4 border-b border-[#333333] bg-[#000000]">
           <div className="flex items-center gap-4">
             <Button
@@ -509,20 +598,15 @@ export default function DocuMindPage() {
             <h1 className="text-2xl font-bold text-[#FFFFFF]">DocuMind</h1>
           </div>
 
-          {/* Speech Toggle */}
           <Button
             onClick={toggleSpeech}
-            variant="outline"
-            className={`h-12 px-4 text-lg font-semibold border-2 focus:ring-4 focus:ring-[#FFFF00] focus:outline-none ${
+            variant="ghost" 
+            className={`h-12 px-4 text-lg font-semibold border-2 focus:ring-4 focus:ring-[#FFFF00] focus:outline-none transition-colors ${
               isSpeechEnabled
-                ? "bg-[#FFFFFF] text-[#000000] border-[#FFFFFF]"
+                ? "bg-[#FFFF00] text-[#000000] border-[#FFFF00] hover:bg-[#cccc00]"
                 : "bg-transparent text-[#FFFFFF] border-[#FFFFFF] hover:bg-[#333333]"
             }`}
-            aria-label={
-              isSpeechEnabled
-                ? "Pause speech synthesis"
-                : "Play speech synthesis"
-            }
+            aria-label={isSpeechEnabled ? "Pause speech synthesis" : "Play speech synthesis"}
             aria-pressed={isSpeechEnabled}
           >
             {isSpeechEnabled ? (
@@ -539,88 +623,104 @@ export default function DocuMindPage() {
           </Button>
         </header>
 
-        {/* Document Summary Section */}
-        <section
-          className="p-6 border-b border-[#333333] bg-[#0a0a0a]"
-          aria-labelledby="summary-heading"
-        >
-          <h2
-            id="summary-heading"
-            className="text-xl font-bold mb-4 text-[#FFFFFF]"
-          >
+        {/* --- UPGRADED AI UI DISPLAY --- */}
+        <section className="p-6 border-b border-[#333333] bg-[#0a0a0a]" aria-labelledby="summary-heading">
+          <h2 id="summary-heading" className="text-xl font-bold mb-4 text-[#FFFFFF]">
             Document Summary
           </h2>
-          <div className="bg-[#1a1a1a] rounded-lg p-6 border border-[#333333]">
+          <div className="bg-[#1a1a1a] rounded-lg p-6 border border-[#333333] space-y-6">
             {selectedDocument ? (
               <>
-                <h3 className="text-lg font-semibold mb-2 text-[#FFFFFF]">
-                  {selectedDocument.name}
+                <h3 className="text-2xl font-semibold text-[#FFFFFF]">
+                  {selectedDocument.originalName || "Document"}
                 </h3>
-                <p className="text-lg leading-relaxed text-[#e0e0e0]">
-                  {selectedDocument.aiAnalysis?.summary ||
-                    "No summary available for this document."}
-                </p>
-                {selectedDocument.aiAnalysis?.pages &&
-                  selectedDocument.aiAnalysis.pages.length > 0 && (
-                    <p className="mt-4 text-sm text-[#a0a0a0]">
-                      Use Left/Right arrow keys to navigate pages. Spacebar to
-                      repeat last announcement. Currently on page{" "}
-                      {currentPageIndex + 1} of{" "}
-                      {selectedDocument.aiAnalysis.pages.length}.
-                    </p>
-                  )}
+
+                {selectedDocument.aiAnalysis?.pages && selectedDocument.aiAnalysis.pages[currentPageIndex] ? (
+                  <div className="space-y-6">
+                    {/* Audio Intro Box */}
+                    <div className="bg-[#262626] p-5 rounded-md border border-[#404040]">
+                      <h4 className="text-[#FFFF00] font-medium mb-2 flex items-center gap-2">
+                        <Volume2 className="size-5" /> Audio Intro
+                      </h4>
+                      <p className="text-lg leading-relaxed text-[#e0e0e0]">
+                        {selectedDocument.aiAnalysis.pages[currentPageIndex].audioNavigation?.audioIntro || "No audio intro available."}
+                      </p>
+                    </div>
+
+                    {/* Layout Notes */}
+                    {selectedDocument.aiAnalysis.pages[currentPageIndex].visionAnalysis?.layoutNotes && (
+                      <div>
+                        <h4 className="text-sm text-[#a0a0a0] uppercase tracking-wider mb-2 font-bold">Layout Notes</h4>
+                        <p className="text-[#cccccc] text-lg">
+                          {selectedDocument.aiAnalysis.pages[currentPageIndex].visionAnalysis?.layoutNotes}
+                        </p>
+                      </div>
+                    )}
+
+                    {/* Navigation Hints / Sections */}
+                    {selectedDocument.aiAnalysis.pages[currentPageIndex].audioNavigation?.navigationHints && (
+                      <div>
+                        <h4 className="text-sm text-[#a0a0a0] uppercase tracking-wider mb-3 font-bold">Sections Detected</h4>
+                        <ul className="space-y-3">
+                          {selectedDocument.aiAnalysis.pages[currentPageIndex].audioNavigation?.navigationHints?.map((hint, idx) => (
+                            <li key={idx} className="flex gap-4 text-[#cccccc] bg-[#000000] p-4 rounded border border-[#333333]">
+                              <span className="text-[#FFFF00] font-bold text-lg">{idx + 1}.</span>
+                              <span className="text-lg leading-relaxed">{hint.summary}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {selectedDocument.aiAnalysis.pages.length > 1 && (
+                      <div className="mt-4 pt-4 border-t border-[#333333]">
+                        <p className="text-md text-[#FFFF00] font-medium">
+                          Page {currentPageIndex + 1} of {selectedDocument.aiAnalysis.pages.length}. 
+                          Use Left/Right arrow keys to navigate pages.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <p className="text-lg text-[#a0a0a0]">
+                    {selectedDocument.extractedText 
+                      ? selectedDocument.extractedText.substring(0, 500) + "..." 
+                      : "No analysis available yet."}
+                  </p>
+                )}
               </>
             ) : (
               <p className="text-lg text-[#a0a0a0]">
-                {isLoading
-                  ? "Loading document..."
-                  : "Select a document to view its summary"}
+                {isLoading ? "Loading document..." : "Select or upload a document to view its summary"}
               </p>
             )}
           </div>
         </section>
 
-        {/* Chat Interface */}
-        <section
-          className="flex-1 flex flex-col min-h-0"
-          aria-labelledby="chat-heading"
-        >
-          <h2 id="chat-heading" className="sr-only">
-            Chat with DocuMind
-          </h2>
+        <section className="flex-1 flex flex-col min-h-0" aria-labelledby="chat-heading">
+          <h2 id="chat-heading" className="sr-only">Chat with DocuMind</h2>
 
-          {/* Chat Messages */}
           <ScrollArea className="flex-1 p-4">
-            <div
-              role="log"
-              aria-live="polite"
-              aria-atomic="false"
-              aria-relevant="additions"
-              aria-label="Chat messages"
-              className="space-y-4"
-            >
-              {messages.map((message) => (
-                <div
-                  key={message.id}
-                  className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}
-                >
-                  <div
-                    className={`max-w-[80%] p-4 rounded-2xl text-lg ${
-                      message.role === "user"
-                        ? "bg-[#FFFFFF] text-[#000000] rounded-br-md"
-                        : "bg-[#1a1a1a] text-[#FFFFFF] border border-[#333333] rounded-bl-md"
-                    }`}
-                    role="article"
-                    aria-label={`${message.role === "user" ? "You said" : "DocuMind said"}: ${message.content}`}
-                  >
-                    <p className="leading-relaxed">{message.content}</p>
+            <div role="log" aria-live="polite" aria-atomic="false" aria-relevant="additions" className="space-y-4">
+              {messages.map((message, index) => (
+                <div 
+                  key={message.id || (message as any)._id || `msg-${index}`} 
+                  className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}>
+                  <div className={`max-w-[80%] p-4 rounded-2xl text-lg ${
+                    message.role === "user"
+                      ? "bg-[#FFFFFF] text-[#000000] rounded-br-md"
+                      : "bg-[#1a1a1a] text-[#FFFFFF] border border-[#333333] rounded-bl-md"}`}>
+                    <p className="leading-relaxed whitespace-pre-wrap">{message.content}</p>
                   </div>
                 </div>
               ))}
               {isLoading && (
                 <div className="flex justify-start">
                   <div className="max-w-[80%] p-4 rounded-2xl text-lg bg-[#1a1a1a] text-[#FFFFFF] border border-[#333333] rounded-bl-md">
-                    <p className="leading-relaxed animate-pulse">Thinking...</p>
+                    <p className="leading-relaxed flex items-center gap-2">
+                      <Loader2 className="size-4 animate-spin text-[#FFFF00]" />
+                      Thinking...
+                    </p>
                   </div>
                 </div>
               )}
@@ -628,18 +728,9 @@ export default function DocuMindPage() {
             </div>
           </ScrollArea>
 
-          {/* Chat Input */}
           <div className="p-4 border-t border-[#333333] bg-[#0a0a0a]">
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                handleSendMessage();
-              }}
-              className="flex gap-3"
-            >
-              <label htmlFor="chat-input" className="sr-only">
-                Type your message to DocuMind
-              </label>
+            <form onSubmit={(e) => { e.preventDefault(); handleSendMessage(); }} className="flex gap-3">
+              <label htmlFor="chat-input" className="sr-only">Type your message</label>
               <Input
                 id="chat-input"
                 ref={chatInputRef}
@@ -649,42 +740,28 @@ export default function DocuMindPage() {
                 onChange={(e) => setInputValue(e.target.value)}
                 onKeyDown={handleKeyDown}
                 className="flex-1 h-14 text-lg px-4 bg-[#1a1a1a] border-2 border-[#333333] text-[#FFFFFF] placeholder:text-[#a0a0a0] focus:ring-4 focus:ring-[#FFFF00] focus:border-[#FFFF00] focus:outline-none"
-                aria-label="Type your message to DocuMind"
               />
-              {/* Microphone Button */}
               <Button
                 type="button"
                 onClick={toggleRecording}
-                className={`h-14 px-4 border-2 focus:ring-4 focus:ring-[#FFFF00] focus:outline-none ${
-                  isRecording
-                    ? "bg-[#ff4444] text-[#FFFFFF] border-[#ff4444] hover:bg-[#cc3333]"
+                className={`h-14 px-4 border-2 focus:ring-4 focus:ring-[#FFFF00] focus:outline-none transition-all ${
+                  isRecording 
+                    ? "bg-[#ff4444] text-[#FFFFFF] border-[#ff4444] hover:bg-[#cc0000]" 
                     : "bg-[#333333] text-[#FFFFFF] border-[#333333] hover:bg-[#444444]"
                 }`}
-                aria-label="Hold to record question"
-                aria-pressed={isRecording}
+                aria-label={isRecording ? "Stop recording" : "Start recording"}
               >
-                {isRecording ? (
-                  <MicOff className="size-6" aria-hidden="true" />
-                ) : (
-                  <Mic className="size-6" aria-hidden="true" />
-                )}
-                <span className="sr-only">
-                  {isRecording ? "Stop recording" : "Start recording"}
-                </span>
+                <Mic className={`size-6 ${isRecording ? "animate-pulse" : ""}`} />
               </Button>
               <Button
                 type="submit"
-                className="h-14 px-6 bg-[#FFFFFF] text-[#000000] hover:bg-[#e0e0e0] focus:ring-4 focus:ring-[#FFFF00] focus:outline-none"
-                aria-label="Send message"
+                className="h-14 px-6 bg-[#FFFFFF] text-[#000000] focus:ring-4 focus:ring-[#FFFF00] focus:outline-none disabled:opacity-50"
                 disabled={!inputValue.trim() || isLoading}
               >
-                <Send className="size-6" aria-hidden="true" />
+                <Send className="size-6" />
                 <span className="sr-only">Send</span>
               </Button>
             </form>
-            <p className="mt-2 text-sm text-[#a0a0a0]">
-              Press Enter to send. Use the microphone to dictate your question.
-            </p>
           </div>
         </section>
       </main>
