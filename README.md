@@ -1,37 +1,62 @@
-🧠 DocuMind: Agentic AI Document Accessibility Platform
-DocuMind is a full-stack, accessibility-first document assistant designed to make complex, visual documents (like invoices, multi-page PDFs, and reports) fully navigable and understandable for visually impaired users.
+# DocuMind: Agentic AI Document Accessibility Platform
 
-Instead of relying on basic LLM wrappers, DocuMind utilizes an Agentic AI Workflow (Actor-Reviewer architecture), custom Computer Vision preprocessing, and native Browser Accessibility APIs to create an interactive Audio-Pilot that guides users through documents without hallucinations.
+DocuMind is a full-stack, accessibility-first AI document assistant designed to make complex visual documents (invoices, multi-page PDFs, reports) fully navigable and understandable for visually impaired users.
 
-✨ Key Features
-🖥️ The Frontend (Accessibility UI)
-The Audio-Pilot": Utilizes the native Web Speech API to automatically read AI-generated document summaries, layout notes, and navigation hints.
-WCAG 2.1 AA Compliant: Features a high-contrast dark mode (shadcn/ui), strictly enforced ARIA labels, aria-live polite regions for screen readers, and hidden skip-links.
-Keyboard-First Navigation: Users can navigate between pages of a complex PDF using Left/Right arrow keys, instantly triggering contextual audio summaries for the new page.
-Multimodal Chat: Users can type questions or use the built-in Speech-to-Text microphone to dictate questions to the AI.
-Global Localization: Built to support multilingual document processing and localized TTS voices (including Hindi and Tamil).
+It uses an Agentic AI workflow (Actor–Reviewer architecture), Computer Vision preprocessing, and browser-native accessibility APIs to deliver an interactive, voice-driven document experience with minimal hallucinations.
 
-⚙️ The Backend (AI & Vision Core)
-Hybrid Document Ingestion: Supports high-resolution images and multi-page PDFs, dynamically chunking and processing documents page-by-page.
-Computer Vision Preprocessing: Utilizes Python and OpenCV (Grayscale, Gaussian Blur, Otsu's Thresholding) to clean, upscale, and de-noise images before text extraction.
+---
 
-Multi-Agent Architecture:
-The Vision Agent (Llama-4-Vision): Scans the document for layout structures, logos, and tables that traditional OCR misses.
-The Actor Agent (Llama-3.3-70b): Synthesizes OCR text and Vision data to write a screen-reader-friendly audio navigation script.
-The Reviewer Agent: Acts as an automated fact-checker, grading the Actor's script against the raw OCR text to flag AI hallucinations.
-Zero-Hallucination RAG Chat: An interactive API endpoint constrained by strict anti-hallucination prompting and backed by a MongoDB cache to save tokens on repeat questions.
-The Digital Janitor: Automated cleanup routines to prevent server memory leaks from temporary Python image processing.
+## Key Features
 
-🛠️ Tech Stack
-Frontend: Next.js (TypeScript), React, Tailwind CSS, shadcn/ui, Web Speech API (TTS/STT).
-Backend: Node.js, Express.js, MongoDB (Mongoose), multer.
-Computer Vision & OCR: Python, OpenCV, Tesseract OCR.
-AI Engine: Groq SDK (Llama 3.3 Versatile, Llama 4 Vision).
+### Frontend (Accessibility UI)
 
-🏗️ System Architecture Pipeline
-Upload: User uploads a file via the Next.js UI. Node.js catches it via /api/upload. PDFs are split into individual images.
-Pre-processing (Python): Images are upscaled and binarized using OpenCV for maximum OCR accuracy.
-Extraction (Python): Tesseract OCR reads the text and generates positional metadata.
-Analysis & Synthesis (Groq): Llama Vision identifies non-text elements. Llama Text writes an audio-navigable JSON script.
-Storage: Raw text, vision notes, and the audio script are saved to MongoDB. Temporary processing files are swept from the server.
-Interaction: The Next.js UI receives the structured payload, waking up the Audio-Pilot to read the summary, and opening the RAG endpoint for voice-dictated Q&A.
+* Audio-Pilot using Web Speech API to read document summaries, layout descriptions, and navigation hints
+* WCAG 2.1 AA compliant interface with ARIA labels, aria-live regions, and skip links
+* Keyboard-first navigation for multi-page documents with real-time audio feedback
+* Multimodal chat with text and speech-to-text input
+* Support for multilingual document processing and localized TTS
+
+---
+
+### Backend (AI & Vision Core)
+
+* Hybrid document ingestion for images and multi-page PDFs with page-wise processing
+* Computer Vision preprocessing using OpenCV (grayscale, blur, thresholding)
+* Multi-agent architecture:
+
+  * Vision Agent (Llama-4-Vision) for layout and non-text understanding
+  * Actor Agent (Llama-3.3) for generating structured audio scripts
+  * Reviewer Agent for validating outputs and reducing hallucinations
+* RAG-based query system with MongoDB caching for efficient responses
+* Automated cleanup system for temporary file management
+
+---
+
+## Tech Stack
+
+Frontend:
+
+* Next.js (TypeScript), React
+* Tailwind CSS, shadcn/ui
+* Web Speech API (TTS/STT)
+
+Backend:
+
+* Node.js, Express.js
+* MongoDB (Mongoose), Multer
+
+AI & Vision Pipeline:
+
+* Python, OpenCV, Tesseract OCR
+* Groq API (Llama 3.3, Llama 4 Vision)
+
+---
+
+## System Architecture Pipeline
+
+1. Upload: Document is uploaded via `/api/upload` and PDFs are split into images
+2. Pre-processing: Images are enhanced using OpenCV
+3. Extraction: Tesseract OCR extracts text and positional metadata
+4. Analysis & Synthesis: Vision model detects layout, text model generates structured output
+5. Storage: Data is stored in MongoDB and temporary files are cleaned
+6. Interaction: Users query documents via RAG-based chat
