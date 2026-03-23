@@ -22,7 +22,7 @@ It uses an Agentic AI workflow (Actor–Reviewer architecture), Computer Vision 
 
 * Hybrid document ingestion for images and multi-page PDFs with page-wise processing
 * Computer Vision preprocessing using OpenCV (grayscale, blur, thresholding)
-* + Tesseract OCR extracts text and positional metadata, which is used to construct a structured DOM-like representation of the document (headings, paragraphs, tables)
+* Tesseract OCR extracts text and positional metadata, which is used to construct a structured DOM-like representation of the document (headings, paragraphs, tables)
 * Multi-agent architecture:
   * Vision Agent (Llama-4-Vision) for layout and non-text understanding
   * Actor Agent (Llama-3.3) for generating structured audio scripts
