@@ -1,51 +1,37 @@
-# 🧠 DocuMind: Agentic AI Document Accessibility Platform
+🧠 DocuMind: Agentic AI Document Accessibility Platform
+DocuMind is a full-stack, accessibility-first document assistant designed to make complex, visual documents (like invoices, multi-page PDFs, and reports) fully navigable and understandable for visually impaired users.
 
-DocuMind is an accessibility-first, AI-powered document assistant designed to make complex, visual documents (like invoices, multi-page PDFs, and reports) fully navigable and understandable for visually impaired users. 
+Instead of relying on basic LLM wrappers, DocuMind utilizes an Agentic AI Workflow (Actor-Reviewer architecture), custom Computer Vision preprocessing, and native Browser Accessibility APIs to create an interactive Audio-Pilot that guides users through documents without hallucinations.
 
-Instead of relying on basic LLM wrappers, DocuMind utilizes an **Agentic AI Workflow** with an Actor-Reviewer architecture, custom Computer Vision preprocessing, and a Retrieval-Augmented Generation (RAG) chat API to ensure zero-hallucination document querying.
+✨ Key Features
+🖥️ The Frontend (Accessibility UI)
+The Audio-Pilot": Utilizes the native Web Speech API to automatically read AI-generated document summaries, layout notes, and navigation hints.
+WCAG 2.1 AA Compliant: Features a high-contrast dark mode (shadcn/ui), strictly enforced ARIA labels, aria-live polite regions for screen readers, and hidden skip-links.
+Keyboard-First Navigation: Users can navigate between pages of a complex PDF using Left/Right arrow keys, instantly triggering contextual audio summaries for the new page.
+Multimodal Chat: Users can type questions or use the built-in Speech-to-Text microphone to dictate questions to the AI.
+Global Localization: Built to support multilingual document processing and localized TTS voices (including Hindi and Tamil).
 
-## ✨ Key Features (Backend Core)
+⚙️ The Backend (AI & Vision Core)
+Hybrid Document Ingestion: Supports high-resolution images and multi-page PDFs, dynamically chunking and processing documents page-by-page.
+Computer Vision Preprocessing: Utilizes Python and OpenCV (Grayscale, Gaussian Blur, Otsu's Thresholding) to clean, upscale, and de-noise images before text extraction.
 
-* **Robust Document Ingestion:** Supports high-resolution images and multi-page PDFs, dynamically splitting and processing documents page-by-page.
-* **Computer Vision Preprocessing:** Utilizes Python and OpenCV (Grayscale, Gaussian Blur, Otsu's Thresholding) to clean, upscale, and de-noise images before text extraction.
-* **Advanced Text Extraction:** Uses Tesseract OCR to extract exact word coordinates, building a structured DOM tree of headings, paragraphs, and tables.
-* **Multi-Agent Architecture (Actor-Reviewer):**
-  * **The Vision Agent (Llama-4-Vision):** Scans the document for layout structures, logos, and tables that OCR cannot understand.
-  * **The Actor Agent (Llama-3.3-70b):** Synthesizes OCR text and Vision data to write a screen-reader-friendly audio navigation script.
-  * **The Reviewer Agent:** Acts as an automated fact-checker, grading the Actor's script against the raw OCR text to catch and flag AI hallucinations.
-* **Zero-Hallucination RAG Chat:** An interactive API endpoint allowing users to ask specific questions about the uploaded document, constrained by strict anti-hallucination prompting.
+Multi-Agent Architecture:
+The Vision Agent (Llama-4-Vision): Scans the document for layout structures, logos, and tables that traditional OCR misses.
+The Actor Agent (Llama-3.3-70b): Synthesizes OCR text and Vision data to write a screen-reader-friendly audio navigation script.
+The Reviewer Agent: Acts as an automated fact-checker, grading the Actor's script against the raw OCR text to flag AI hallucinations.
+Zero-Hallucination RAG Chat: An interactive API endpoint constrained by strict anti-hallucination prompting and backed by a MongoDB cache to save tokens on repeat questions.
+The Digital Janitor: Automated cleanup routines to prevent server memory leaks from temporary Python image processing.
 
-## 🛠️ Tech Stack
+🛠️ Tech Stack
+Frontend: Next.js (TypeScript), React, Tailwind CSS, shadcn/ui, Web Speech API (TTS/STT).
+Backend: Node.js, Express.js, MongoDB (Mongoose), multer.
+Computer Vision & OCR: Python, OpenCV, Tesseract OCR.
+AI Engine: Groq SDK (Llama 3.3 Versatile, Llama 4 Vision).
 
-* **Server:** Node.js, Express.js
-* **Database:** MongoDB, Mongoose
-* **File Handling:** Multer
-* **Computer Vision & OCR:** Python, OpenCV, Tesseract OCR
-* **AI Engine:** Groq SDK (Llama 3.3 Versatile, Llama 4 Vision)
-
-## 🏗️ System Architecture Pipeline
-
-1. **Upload:** File is received via `/api/upload`. PDFs are chunked into individual images.
-2. **Pre-processing (Python):** Images are upscaled and binarized using OpenCV for maximum OCR accuracy.
-3. **Extraction (Python):** Tesseract OCR reads the text and generates positional metadata.
-4. **Analysis (Groq):** Llama Vision identifies non-text elements (tables, images).
-5. **Synthesis (Groq):** Llama Text writes an audio-navigable JSON script.
-6. **Storage:** The raw text, vision notes, and audio script are securely saved to MongoDB.
-7. **Query (RAG):** User hits `/api/documents/:id/chat` with a question, and the AI answers strictly using the saved OCR data.
-
-## 🚀 API Endpoints
-
-### 1. Upload & Process Document
-`POST /api/upload`
-* **Form-Data:** `document` (File: PDF, JPEG, PNG)
-* **Response:** Returns complete processing metrics, extracted text, and the AI-generated audio navigation script.
-
-### 2. Document Q&A (RAG)
-`POST /api/documents/:id/chat`
-* **Body:** `{ "question": "What is the total amount due?" }`
-* **Response:**
-  ```json
-  {
-    "success": true,
-    "answer": "The total amount due is $154.06."
-  }
+🏗️ System Architecture Pipeline
+Upload: User uploads a file via the Next.js UI. Node.js catches it via /api/upload. PDFs are split into individual images.
+Pre-processing (Python): Images are upscaled and binarized using OpenCV for maximum OCR accuracy.
+Extraction (Python): Tesseract OCR reads the text and generates positional metadata.
+Analysis & Synthesis (Groq): Llama Vision identifies non-text elements. Llama Text writes an audio-navigable JSON script.
+Storage: Raw text, vision notes, and the audio script are saved to MongoDB. Temporary processing files are swept from the server.
+Interaction: The Next.js UI receives the structured payload, waking up the Audio-Pilot to read the summary, and opening the RAG endpoint for voice-dictated Q&A.
