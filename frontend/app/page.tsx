@@ -81,6 +81,7 @@ export default function DocuMindPage() {
   const [isRecording, setIsRecording] = useState(false);
   const [currentPageIndex, setCurrentPageIndex] = useState(0);
   const [lastAnnouncement, setLastAnnouncement] = useState("");
+  const [srAnnouncement, setSrAnnouncement] = useState("");
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatInputRef = useRef<HTMLInputElement>(null);
@@ -152,6 +153,7 @@ export default function DocuMindPage() {
     if (!file) return;
 
     setIsUploading(true);
+    setSrAnnouncement("Uploading and analyzing document. Please wait.");
     const formData = new FormData();
     // MATCH 1: Backend multer expects 'document', not 'file'
     formData.append("document", file); 
@@ -226,32 +228,46 @@ export default function DocuMindPage() {
     [isSpeechEnabled]
   );
 
-  // Auto-speak summary when document loads and speech is enabled
+ // Auto-speak summary when document loads, page changes, and speech is enabled
   useEffect(() => {
     if (selectedDocument && isSpeechEnabled) {
       const pages = selectedDocument.aiAnalysis?.pages;
       
-      if (pages && pages.length > 0) {
-        // Grab the beautiful audioIntro from your backend
-        const firstPageIntro = pages[0].audioNavigation?.audioIntro;
+      if (pages && pages.length > 0 && pages[currentPageIndex]) {
+        const page = pages[currentPageIndex];
         
-        if (firstPageIntro) {
-          speak(firstPageIntro, () => {
-            // After reading the intro, give instructions based on page count
-            if (pages.length > 1) {
-              setTimeout(() => {
-                speak("Would you like to hear the next page? Use your right arrow key to proceed.");
-              }, 500);
-            } else {
-              setTimeout(() => {
-                speak("I have loaded the sections for this page. What would you like to know?");
-              }, 500);
-            }
+        // 1. Grab the Audio Intro
+        let fullScript = page.audioNavigation?.audioIntro || "Summary loaded.";
+        
+        // 2. Append Layout Notes (if they exist)
+        if (page.visionAnalysis?.layoutNotes) {
+          fullScript += ` Layout notes: ${page.visionAnalysis.layoutNotes}`;
+        }
+        
+        // 3. Append Sections (if they exist)
+        if (page.audioNavigation?.navigationHints && page.audioNavigation.navigationHints.length > 0) {
+          fullScript += ` I have detected ${page.audioNavigation.navigationHints.length} sections. `;
+          page.audioNavigation.navigationHints.forEach((hint: any, idx: number) => {
+            fullScript += `Section ${idx + 1}: ${hint.summary}. `;
           });
         }
+
+        // Speak the full stitched script
+        speak(fullScript, () => {
+          // After reading everything, give instructions
+          if (pages.length > 1) {
+            setTimeout(() => {
+              speak(`You are on page ${currentPageIndex + 1} of ${pages.length}. Use your right arrow key to proceed, or ask me a question.`);
+            }, 500);
+          } else {
+            setTimeout(() => {
+              speak("I have loaded the sections for this page. What would you like to know?");
+            }, 500);
+          }
+        });
       }
     }
-  }, [selectedDocument, isSpeechEnabled, speak]);
+  }, [selectedDocument, isSpeechEnabled, currentPageIndex, speak]);
   
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
@@ -346,6 +362,7 @@ export default function DocuMindPage() {
     const questionText = inputValue;
     setInputValue("");
     setIsLoading(true);
+    setSrAnnouncement("Sending question to AI. Please wait.");
 
     try {
       const response = await fetch(
@@ -369,6 +386,7 @@ export default function DocuMindPage() {
           content: data.answer || "I received your question but couldn't generate an answer.",
         };
         setMessages((prev) => [...prev, assistantMessage]);
+        setSrAnnouncement(`AI answered: ${assistantMessage.content}`);
 
         // Speak the response if speech is enabled
         if (isSpeechEnabled) {
@@ -404,7 +422,7 @@ export default function DocuMindPage() {
     }
   };
 
-  const toggleSpeech = () => {
+const toggleSpeech = () => {
     const newState = !isSpeechEnabled;
     setIsSpeechEnabled(newState);
 
@@ -413,10 +431,24 @@ export default function DocuMindPage() {
     }
 
     if (newState && selectedDocument) {
-      const intro = selectedDocument.aiAnalysis?.pages?.[currentPageIndex]?.audioNavigation?.audioIntro;
-      if (intro) {
+      const page = selectedDocument.aiAnalysis?.pages?.[currentPageIndex];
+      if (page) {
+        // Rebuild the full script for the manual toggle
+        let fullScript = page.audioNavigation?.audioIntro || "Summary loaded.";
+        
+        if (page.visionAnalysis?.layoutNotes) {
+          fullScript += ` Layout notes: ${page.visionAnalysis.layoutNotes}`;
+        }
+        
+        if (page.audioNavigation?.navigationHints && page.audioNavigation.navigationHints.length > 0) {
+          fullScript += ` I have detected ${page.audioNavigation.navigationHints.length} sections. `;
+          page.audioNavigation.navigationHints.forEach((hint: any, idx: number) => {
+            fullScript += `Section ${idx + 1}: ${hint.summary}. `;
+          });
+        }
+
         setTimeout(() => {
-          speak(intro);
+          speak(fullScript);
         }, 100);
       }
     }
@@ -432,6 +464,9 @@ export default function DocuMindPage() {
       recognitionRef.current.stop();
       setIsRecording(false);
     } else {
+      if (typeof window !== "undefined") {
+        window.speechSynthesis.cancel();
+      }
       recognitionRef.current.start();
       setIsRecording(true);
     }
@@ -439,13 +474,19 @@ export default function DocuMindPage() {
 
   return (
     <div className="flex h-screen bg-[#000000] text-[#FFFFFF]">
+      
+      {/* 1. BULLETPROOF SKIP LINK: Slid off-screen, comes down on focus */}
       <a
         href="#chat-input"
-        className="sr-only focus:not-sr-only focus:absolute focus:top-4 focus:left-4 focus:z-50 focus:px-4 focus:py-2 focus:bg-[#FFFF00] focus:text-[#000000] focus:font-bold focus:rounded-md focus:ring-4 focus:ring-[#FFFFFF] focus:outline-none"
-        aria-label="Skip to chat input"
+        className="absolute -translate-y-[150%] focus:translate-y-0 top-4 left-4 z-50 px-6 py-3 bg-[#FFFF00] text-[#000000] font-bold rounded-md ring-4 ring-[#FFFFFF] outline-none transition-transform"
       >
         Skip to Chat
       </a>
+
+      {/* 2. THE GLOBAL ANNOUNCER: Invisible to eyes, speaks to Screen Readers */}
+      <div aria-live="polite" aria-atomic="true" className="sr-only">
+        {srAnnouncement}
+      </div>
 
       {isSidebarOpen && (
         <div

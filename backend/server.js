@@ -449,9 +449,7 @@ async function processExtractedTables(tables, pageNumber = 1) {
   return extractedTables;
 }
 
-// ============================================
 // UPDATED FILE UPLOAD ROUTE
-// ============================================
 
 // File upload route with automated preprocessing, OCR pipeline, and multi-page PDF support
 app.post('/api/upload', upload.single('document'), async (req, res) => {
@@ -991,9 +989,7 @@ const documentRoutes = require('./routes/documentRoutes');
 app.use('/api/documents', documentRoutes);
 
 // POST /api/documents/:id/chat - RAG Chat endpoint
-// ============================================
 // RAG HELPER FUNCTIONS
-// ============================================
 
 /**
  * Extract keywords from question (remove stopwords)

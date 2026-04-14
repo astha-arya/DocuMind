@@ -6,6 +6,7 @@ uploads/
 __pycache__/
 uploads/document-*
 uploads/*_pages/
+*_BACKUP.tsx
 
 # v0 runtime files
 __v0_runtime_loader.js
