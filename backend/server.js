@@ -1177,7 +1177,7 @@ function buildContextFromNodes(nodes) {
 app.post('/api/documents/:id/chat', chatLimiter, async (req, res) => { 
   try {
     const { id } = req.params;
-    const { question } = req.body;
+    const { question, language = 'en-US' } = req.body; // Default to English if missing
 
     if (!question) {
       return res.status(400).json({ 
@@ -1231,8 +1231,46 @@ app.post('/api/documents/:id/chat', chatLimiter, async (req, res) => {
     console.log(`\n🔍 STEP 1: Keyword Extraction & Tree Retrieval`);
     
     // Extract keywords from question
-    const keywords = extractKeywords(question);
-    console.log(`📌 Keywords extracted: [${keywords.join(', ')}]`);
+    // 🌍 CROSS-LINGUAL SYNONYM EXPANSION
+    let keywords = []; 
+    let languageInstruction = "Answer in English.";
+    
+    // If the user is speaking a foreign language, translate and create synonyms
+    if (language && language !== 'en-US') {
+      console.log(`🌍 Translating query from ${language} and generating synonyms...`);
+      
+      // 1. Set the strict rule for the FINAL answer
+      languageInstruction = `CRITICAL: You MUST translate your final answer and respond ENTIRELY in the language that corresponds to the locale code '${language}'. Do not use English.`;
+
+      // 2. Ask Groq to translate the search query to English synonyms
+      try {
+        const translateCompletion = await groq.chat.completions.create({
+          messages: [{ 
+            role: 'user', 
+            content: `I am going to search an English document based on this foreign language question. 
+            Translate the core meaning to English, and give me a comma-separated list of 5 to 7 English keywords AND their common synonyms that I should search for. 
+            Return ONLY the comma-separated words. No quotes, no intro text.
+            Original Question: "${question}"` 
+          }],
+          model: 'llama-3.3-70b-versatile',
+          temperature: 0.2, 
+          max_tokens: 50
+        });
+        
+        // Convert the comma-separated string into an array of lowercase words
+        const resultString = translateCompletion.choices[0]?.message?.content.trim();
+        keywords = resultString.split(',').map(word => word.trim().toLowerCase());
+        console.log(`🔄 Expanded Search Keywords: [${keywords.join(', ')}]`);
+        
+      } catch (err) {
+        console.error("Translation micro-step failed:", err.message);
+        keywords = extractKeywords(question).map(w => w.toLowerCase()); // Fallback
+      }
+    } else {
+      // If it's already English, just use your standard keyword extractor
+      keywords = extractKeywords(question).map(w => w.toLowerCase());
+      console.log(`📌 Keywords extracted: [${keywords.join(', ')}]`);
+    }
     
     // Flatten structured tree (handle both PDFs and single images)
     let flatTree = [];
@@ -1276,9 +1314,10 @@ app.post('/api/documents/:id/chat', chatLimiter, async (req, res) => {
       
       // Use legacy approach
       const prompt = `You are an accessibility assistant helping a user understand a document. 
-Answer the user's question based STRICTLY on the document text provided below. 
-If the answer is not in the text, say "I cannot find that information in the document."
-Keep your answer concise and easy to read out loud.
+      Answer the user's question based STRICTLY on the document text provided below. 
+      ${languageInstruction}
+      If the answer is not in the text, say "I cannot find that information in the document."
+      Keep your answer concise and easy to read out loud.
 
 DOCUMENT TEXT:
 ${docText.substring(0, 3000)}
@@ -1356,16 +1395,14 @@ const chatCompletion = await groq.chat.completions.create
     
     // System prompt with context
     const systemPrompt = `You are an expert document assistant. 
-You are currently reading a document named: "${document.originalName}".
+    You are currently reading a document named: "${document.originalName}".
+    You must answer ONLY using the provided context chunks below. 
+    ${languageInstruction}
+    If someone asks what the document is about, use the document name to help figure it out.
 
-You must answer ONLY using the provided context chunks below. 
-If someone asks what the document is about, use the document name to help figure it out.
-
-CRITICAL: You are reading tabular data. If a cell appears blank or missing between columns, it means that attribute does NOT exist. Do not shift values from other columns into empty spaces.
-
-If the answer is not in the context, say "I cannot find that information in the document."
-
-Keep answers concise and easy to read out loud.
+    CRITICAL: You are reading tabular data. If a cell appears blank or missing between columns, it means that attribute does NOT exist. Do not shift values from other columns into empty spaces.
+    If the answer is not in the context, say "I cannot find that information in the document."
+    Keep answers concise and easy to read out loud.
 
 DOCUMENT CONTEXT:
 ${contextString}`;
@@ -1427,6 +1464,52 @@ ${contextString}`;
       error: 'Failed to process question.',
       details: error.message 
     });
+  }
+});
+
+// ON-THE-FLY TRANSLATION ENDPOINT (WITH CACHING)
+// 1. Create a memory cache object outside the route
+const translationCache = new Map();
+
+app.post('/api/translate', async (req, res) => {
+  try {
+    const { text, targetLanguage } = req.body;
+
+    if (!text || targetLanguage === 'en-US') {
+      return res.json({ success: true, translatedText: text });
+    }
+
+    // 2. Check the cache FIRST!
+    const cacheKey = `${targetLanguage}_${text}`;
+    if (translationCache.has(cacheKey)) {
+      console.log(`⚡ CACHE HIT! Skipping Groq API for translation.`);
+      return res.json({ success: true, translatedText: translationCache.get(cacheKey) });
+    }
+
+    console.log(`🌐 Calling Groq API to translate to ${targetLanguage}...`);
+    const prompt = `Translate the following text into the language corresponding to the locale code '${targetLanguage}'. 
+    Return ONLY the translated text. Do not add quotes, explanations, or any other formatting.
+    
+    TEXT TO TRANSLATE:
+    ${text}`;
+
+    const completion = await groq.chat.completions.create({
+      messages: [{ role: 'user', content: prompt }],
+      model: 'llama-3.3-70b-versatile',
+      temperature: 0.1,
+      max_tokens: 1024
+    });
+
+    const translatedText = completion.choices[0]?.message?.content.trim();
+    
+    // 3. Save the new translation to the cache for next time
+    translationCache.set(cacheKey, translatedText);
+
+    res.json({ success: true, translatedText });
+
+  } catch (error) {
+    console.error('❌ Translation Error:', error.message);
+    res.json({ success: false, translatedText: req.body.text }); 
   }
 });
 

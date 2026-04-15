@@ -82,6 +82,7 @@ export default function DocuMindPage() {
   const [currentPageIndex, setCurrentPageIndex] = useState(0);
   const [lastAnnouncement, setLastAnnouncement] = useState("");
   const [srAnnouncement, setSrAnnouncement] = useState("");
+  const [selectedLanguage, setSelectedLanguage] = useState("en-US");
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatInputRef = useRef<HTMLInputElement>(null);
@@ -197,23 +198,29 @@ export default function DocuMindPage() {
       window.speechSynthesis.cancel();
       const utterance = new SpeechSynthesisUtterance(text);
 
-      // --- VOICE UPGRADE LOGIC ---
+      utterance.lang = selectedLanguage;
+
+      // --- UPGRADED VOICE HUNTING ---
       const voices = window.speechSynthesis.getVoices();
       
-      // Hunt for a high-quality natural voice (Mac/Windows/Chrome)
-      const naturalVoice = voices.find(v => 
-        v.name.includes("Samantha") || // Apple's natural female
-        v.name.includes("Daniel") ||   // Apple's natural UK male
-        v.name.includes("Google US English") || 
-        v.name.includes("Premium") ||  // High-quality system voices
-        v.name.includes("Natural")
-      );
-
-      if (naturalVoice) {
-        utterance.voice = naturalVoice;
+      // 1. Grab the base language code (e.g., 'hi' from 'hi-IN')
+      const baseLang = selectedLanguage.split('-')[0].toLowerCase();
+      
+      // 2. Hunt for a voice that matches the language
+      let voiceToUse = voices.find((v) => v.lang.toLowerCase().includes(baseLang));
+      
+      // 3. If English, strictly hunt for the premium voices
+      if (baseLang === "en") {
+        voiceToUse = voices.find(v => 
+          (v.lang.includes("en") && (v.name.includes("Samantha") || v.name.includes("Daniel") || v.name.includes("Premium") || v.name.includes("Natural")))
+        ) || voiceToUse; 
       }
 
-      utterance.rate = 0.95; // Slightly slower feels more conversational
+      if (voiceToUse) {
+        utterance.voice = voiceToUse;
+      }
+
+      utterance.rate = 0.95; 
       utterance.pitch = 1;
       utterance.volume = 1;
 
@@ -225,8 +232,56 @@ export default function DocuMindPage() {
       setLastAnnouncement(text);
       window.speechSynthesis.speak(utterance);
     },
-    [isSpeechEnabled]
+    [isSpeechEnabled, selectedLanguage] 
   );
+
+  // Smart Speaker: Translates text via backend before speaking if language is not English
+  const translateAndSpeak = useCallback(async (textToSpeak: string, languageCode: string, onEndCallback?: () => void) => {
+    if (languageCode === 'en-US') {
+      speak(textToSpeak, onEndCallback);
+      return;
+    }
+
+    try {
+      window.speechSynthesis.cancel();
+      console.log(`🌐 Sending to backend translation API: [${languageCode}]`);
+      
+      const response = await fetch(`${API_BASE_URL}/api/translate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ 
+          text: textToSpeak, 
+          targetLanguage: languageCode 
+        }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        if (data.success) {
+          console.log("✅ Translation success:", data.translatedText.substring(0, 50) + "...");
+          speak(data.translatedText, onEndCallback);
+        } else {
+          console.error("❌ Backend returned false success flag.");
+          speak(textToSpeak, onEndCallback);
+        }
+      } else {
+        console.error(`❌ Backend API failed with status: ${response.status}`);
+        speak(textToSpeak, onEndCallback);
+      }
+    } catch (error) {
+      console.error("❌ Network fetch completely failed:", error);
+      speak(textToSpeak, onEndCallback);
+    }
+  }, [speak]);
+
+  // --- NEW: Force the browser to load premium voices immediately ---
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const loadVoices = () => window.speechSynthesis.getVoices();
+      loadVoices();
+      window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+  }, []);
 
  // Auto-speak summary when document loads, page changes, and speech is enabled
   useEffect(() => {
@@ -253,21 +308,20 @@ export default function DocuMindPage() {
         }
 
         // Speak the full stitched script
-        speak(fullScript, () => {
-          // After reading everything, give instructions
+        translateAndSpeak(fullScript, selectedLanguage, () => {
           if (pages.length > 1) {
             setTimeout(() => {
-              speak(`You are on page ${currentPageIndex + 1} of ${pages.length}. Use your right arrow key to proceed, or ask me a question.`);
+              translateAndSpeak(`You are on page ${currentPageIndex + 1} of ${pages.length}. Use your right arrow key to proceed, or ask me a question.`, selectedLanguage);
             }, 500);
           } else {
             setTimeout(() => {
-              speak("I have loaded the sections for this page. What would you like to know?");
+              translateAndSpeak("I have loaded the sections for this page. What would you like to know?", selectedLanguage);
             }, 500);
           }
         });
       }
     }
-  }, [selectedDocument, isSpeechEnabled, currentPageIndex, speak]);
+  }, [selectedDocument, isSpeechEnabled, currentPageIndex,, selectedLanguage, translateAndSpeak]);
   
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
@@ -304,6 +358,13 @@ export default function DocuMindPage() {
     }
   }, []);
 
+  // Sync the microphone language whenever the user changes the dropdown
+  useEffect(() => {
+    if (recognitionRef.current) {
+      recognitionRef.current.lang = selectedLanguage;
+    }
+  }, [selectedLanguage]);
+
   // Keyboard navigation
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -323,7 +384,7 @@ export default function DocuMindPage() {
             const nextIndex = currentPageIndex + 1;
             setCurrentPageIndex(nextIndex);
             const nextIntro = pages[nextIndex].audioNavigation?.audioIntro || `Page ${pages[nextIndex].pageNumber}`;
-            speak(nextIntro);
+            translateAndSpeak(nextIntro, selectedLanguage);
           }
           break;
         case "ArrowLeft":
@@ -332,7 +393,7 @@ export default function DocuMindPage() {
             const prevIndex = currentPageIndex - 1;
             setCurrentPageIndex(prevIndex);
             const prevIntro = pages[prevIndex].audioNavigation?.audioIntro || `Page ${pages[prevIndex].pageNumber}`;
-            speak(prevIntro);
+            translateAndSpeak(prevIntro, selectedLanguage);
           }
           break;
         case " ":
@@ -372,8 +433,11 @@ export default function DocuMindPage() {
           headers: {
             "Content-Type": "application/json",
           },
-          // MATCH 3: Backend expects { question: "..." }
-          body: JSON.stringify({ question: questionText }), 
+          // Send BOTH the question and the selected language to your backend
+          body: JSON.stringify({ 
+            question: questionText,
+            language: selectedLanguage 
+          }),
         }
       );
 
@@ -448,7 +512,7 @@ const toggleSpeech = () => {
         }
 
         setTimeout(() => {
-          speak(fullScript);
+          translateAndSpeak(fullScript, selectedLanguage);
         }, 100);
       }
     }
@@ -639,29 +703,53 @@ const toggleSpeech = () => {
             <h1 className="text-2xl font-bold text-[#FFFFFF]">DocuMind</h1>
           </div>
 
-          <Button
-            onClick={toggleSpeech}
-            variant="ghost" 
-            className={`h-12 px-4 text-lg font-semibold border-2 focus:ring-4 focus:ring-[#FFFF00] focus:outline-none transition-colors ${
-              isSpeechEnabled
-                ? "bg-[#FFFF00] text-[#000000] border-[#FFFF00] hover:bg-[#cccc00]"
-                : "bg-transparent text-[#FFFFFF] border-[#FFFFFF] hover:bg-[#333333]"
-            }`}
-            aria-label={isSpeechEnabled ? "Pause speech synthesis" : "Play speech synthesis"}
-            aria-pressed={isSpeechEnabled}
-          >
-            {isSpeechEnabled ? (
-              <>
-                <Volume2 className="size-6 mr-2" aria-hidden="true" />
-                <span>Speech On</span>
-              </>
-            ) : (
-              <>
-                <VolumeX className="size-6 mr-2" aria-hidden="true" />
-                <span>Speech Off</span>
-              </>
-            )}
-          </Button>
+          <div className="flex items-center gap-4">
+            {/* NEW: Accessible Language Dropdown */}
+            <label htmlFor="language-select" className="sr-only">Select Spoken Language</label>
+            <select
+              id="language-select"
+              value={selectedLanguage}
+              onChange={(e) => {
+                const newLang = e.target.value;
+                setSelectedLanguage(newLang);
+                
+                // --- THE ACCESSIBILITY UPGRADE ---
+                // Find the human-readable text of the selected option (e.g., "Hindi (हिंदी)")
+                const langText = e.target.options[e.target.selectedIndex].text;
+                // Tell the screen reader to announce the change immediately
+                setSrAnnouncement(`Spoken language changed to ${langText}`);
+              }}
+              className="h-12 px-4 bg-[#1a1a1a] border-2 border-[#FFFFFF] text-[#FFFFFF] font-semibold rounded-md focus:ring-4 focus:ring-[#FFFF00] focus:outline-none cursor-pointer"
+            >
+              <option value="en-US">English</option>
+              <option value="hi-IN">Hindi (हिंदी)</option>
+              <option value="ta-IN">Tamil (தமிழ்)</option>
+            </select>
+
+            <Button
+              onClick={toggleSpeech}
+              variant="ghost" 
+              className={`h-12 px-4 text-lg font-semibold border-2 focus:ring-4 focus:ring-[#FFFF00] focus:outline-none transition-colors ${
+                isSpeechEnabled
+                  ? "bg-[#FFFF00] text-[#000000] border-[#FFFF00] hover:bg-[#cccc00]"
+                  : "bg-transparent text-[#FFFFFF] border-[#FFFFFF] hover:bg-[#333333]"
+              }`}
+              aria-label={isSpeechEnabled ? "Pause speech synthesis" : "Play speech synthesis"}
+              aria-pressed={isSpeechEnabled}
+            >
+              {isSpeechEnabled ? (
+                <>
+                  <Volume2 className="size-6 mr-2" aria-hidden="true" />
+                  <span>Speech On</span>
+                </>
+              ) : (
+                <>
+                  <VolumeX className="size-6 mr-2" aria-hidden="true" />
+                  <span>Speech Off</span>
+                </>
+              )}
+            </Button>
+          </div>
         </header>
 
         {/* --- UPGRADED AI UI DISPLAY --- */}
